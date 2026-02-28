@@ -16,10 +16,13 @@ import time
 import urllib.parse
 import random
 
+from tqdm import tqdm
+
 from aiohttp.client_exceptions import *
 from datetime import datetime, timedelta
 from goosey.auth import check_app_auth_token
 from goosey.datadumper import DataDumper
+from goosey.progress import get_progress_manager
 from goosey.utils import *
 from io import StringIO
 
@@ -42,6 +45,7 @@ class M365DataDumper(DataDumper):
         self.tenantId = config_get(config, 'config', 'tenant')
         self.ual_tasks = []
         self.ual_results_cache = [] # used to store results in case of cross query interference
+        self.ual_pbar = None
         filters = config_get(config, 'filters', 'date_start', logger=self.logger)
         if filters != '' and  filters is not None:
             self.date_range=True
@@ -765,6 +769,9 @@ class M365DataDumper(DataDumper):
                 elapsed_time = time.perf_counter() - self.ual_seconds
                 rate = int(self.total_ual_logs_saved / elapsed_time * 60 * 60)
                 self.logger.info(f"Saved {len(session_results)} logs. Current rate is {rate} logs/hours")
+                if self.ual_pbar is not None:
+                    self.ual_pbar.update(len(session_results))
+                    self.ual_pbar.set_postfix(rate=f"{rate} logs/hr")
 
             if new_task_created or data_saved:
                 start = end
@@ -841,7 +848,28 @@ class M365DataDumper(DataDumper):
 
         self.total_ual_logs_saved = 0
         self.ual_seconds = time.perf_counter()
-        await asyncio.gather(*tasks)
+
+        # Use progress manager for the UAL bar if available, else fall back to direct tqdm
+        pm = get_progress_manager()
+        if pm and pm.enabled:
+            self.ual_pbar = pm.create_custom_bar(
+                "m365_ual",
+                total=None,
+                unit=" logs",
+                desc="Collecting UAL logs",
+            )
+        else:
+            self.ual_pbar = tqdm(total=None, unit=" logs", desc="Collecting UAL logs", dynamic_ncols=True)
+
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            # If managed by progress manager, let pm.close_all() handle it
+            if not (pm and pm.enabled):
+                self.ual_pbar.close()
+            self.ual_pbar = None
         elapsed = time.perf_counter() - self.ual_seconds
         self.logger.info("Goosey executed in {0:0.2f} seconds.".format(elapsed))
+
+    dump_ual._manages_own_progress = True
 

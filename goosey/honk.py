@@ -17,6 +17,8 @@ import time
 import warnings
 from multiprocessing import Process
 
+from tqdm import tqdm
+
 from goosey.entra_id_datadumper import EntraIdDataDumper
 from goosey.azure_dumper import AzureDataDumper
 from goosey.datadumper import DataDumper
@@ -24,6 +26,7 @@ from goosey.m365_datadumper import M365DataDumper
 from goosey.mde_datadumper import MDEDataDumper
 from goosey.utils import *
 from goosey.auth import auth as gooseyauth
+from goosey.progress import init_progress_manager
 
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -84,6 +87,8 @@ async def run(args, config, auth, init_sections, auth_un_pw=None):
             mdedumper = MDEDataDumper(args.output_dir, args.reports_dir, msft_security_center_auth, msft_security_auth, maindumper.ahsession, config, args.debug)
             mde = True
 
+    pm = init_progress_manager(enabled=not args.debug)
+
     async with maindumper.ahsession as ahsession:
         tasks = []
         if m365:
@@ -96,13 +101,30 @@ async def run(args, config, auth, init_sections, auth_un_pw=None):
             tasks.extend(mdedumper.data_dump(data_calls['mde'], "mde"))
 
         honk_results = await asyncio.gather(*tasks)
+
+        pm.close_all()
+
+        succeeded = 0
+        failed = 0
+        failed_tasks = []
         error_occured = False
         for class_name, func_name, err in honk_results:
             if err:
                 logger.error(f"[{class_name}] {func_name[5:]}: Failed with error {err}")
                 error_occured = True
+                failed += 1
+                failed_tasks.append(f"  {func_name[5:]}: {err}")
             else:
                 logger.info(f"[{class_name}] {func_name[5:]}: Success")
+                succeeded += 1
+
+        # Print summary to console even in quiet mode
+        tqdm.write(f"\nCollection complete: {succeeded} succeeded, {failed} failed out of {succeeded + failed} tasks.")
+        if failed_tasks:
+            tqdm.write("Failed tasks:")
+            for line in failed_tasks:
+                tqdm.write(line)
+
         if error_occured:
             sys.exit(1)
 
@@ -132,7 +154,7 @@ def parse_config(configfile, args, auth=None):
                 data_calls[section][key] = True
                 init_sections.append(section)
 
-    print(args.__dict__)
+    logger.debug(args.__dict__)
     if args.azure:
         for item in [x.replace('dump_', '') for x in dir(AzureDataDumper) if x.startswith('dump_')]:
             data_calls['azure'][item] = True
@@ -185,6 +207,9 @@ def honk(authfile=".ugt_auth",
     global logger
     args = dict2obj(locals())
 
+    if not args.debug:
+        set_quiet_mode(True)
+
     logger = setup_logger(__name__, args.debug)
 
     auth_un_pw, auth = get_authfile(authfile=args.auth, ugt_authfile=args.authfile, logger=logger, encryption_pw=encryption_pw)
@@ -198,6 +223,8 @@ def honk(authfile=".ugt_auth",
     config, init_sections = parse_config(args.config, args)
 
     logger.info("Goosey beginning to honk.")
+    if not args.debug:
+        print("Goosey beginning to honk. Detailed logs in debug.log and error.log.\n")
     seconds = time.perf_counter()
     try:
         asyncio.run(run(args, config, auth, init_sections, auth_un_pw=auth_un_pw))

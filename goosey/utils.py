@@ -74,6 +74,32 @@ class LogLevelFilter(logging.Filter):
     def filter(self, record):
         return record.levelno == self.level
 
+class MinLevelFilter(logging.Filter):
+    """Filter that passes records at or above the specified level."""
+    def __init__(self, level):
+        self.level = level
+
+    def filter(self, record):
+        return record.levelno >= self.level
+
+_quiet_mode = False
+
+def set_quiet_mode(enabled):
+    """Enable or disable quiet mode (suppresses console log output).
+
+    When enabling quiet mode, removes existing console (StreamHandler) handlers
+    from all loggers to suppress output from loggers created before quiet mode was set.
+    """
+    global _quiet_mode
+    _quiet_mode = enabled
+    if enabled:
+        # Remove console StreamHandlers from all existing loggers
+        for name in list(logging.Logger.manager.loggerDict):
+            lgr = logging.getLogger(name)
+            for handler in lgr.handlers[:]:
+                if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
+                    lgr.removeHandler(handler)
+
 def setup_logger(name, debug, formatter='cli') -> None:
     """Helper function to set up logger.
 
@@ -96,15 +122,16 @@ def setup_logger(name, debug, formatter='cli') -> None:
         format = "%(asctime)s - %(taskName)s - %(levelname)s - %(message)s (%(filename)s:%(lineno)d)"
     file_formatter = logging.Formatter(format)
 
+    # debug.log captures ALL log levels (DEBUG, INFO, WARNING, ERROR)
     debug_fh = logging.handlers.WatchedFileHandler(debug_log)
     debug_fh.setFormatter(file_formatter)
-    debug_fh.addFilter(LogLevelFilter(logging.DEBUG))
     debug_fh.setLevel(logging.DEBUG)
 
+    # error.log captures WARNING and ERROR levels
     error_fh = logging.handlers.WatchedFileHandler(error_log)
     error_fh.setFormatter(file_formatter)
-    error_fh.addFilter(LogLevelFilter(logging.ERROR))
-    error_fh.setLevel(logging.ERROR)
+    error_fh.addFilter(MinLevelFilter(logging.WARNING))
+    error_fh.setLevel(logging.WARNING)
 
     logger.addHandler(debug_fh)
     logger.addHandler(error_fh)
@@ -115,17 +142,18 @@ def setup_logger(name, debug, formatter='cli') -> None:
     else:
         logger.setLevel(logging.INFO)
 
-    # create console handler with a higher log level
-    ch = logging.StreamHandler()
+    # Only add console handler when not in quiet mode, or when debug is explicitly on
+    if not _quiet_mode or debug:
+        ch = logging.StreamHandler()
 
-    if debug:
-        ch.setLevel(logging.DEBUG)
-    else:
-        ch.setLevel(logging.INFO)
+        if debug:
+            ch.setLevel(logging.DEBUG)
+        else:
+            ch.setLevel(logging.INFO)
 
-    if formatter == 'cli':
-        ch.setFormatter(CustomFormatter())
-    logger.addHandler(ch)
+        if formatter == 'cli':
+            ch.setFormatter(CustomFormatter())
+        logger.addHandler(ch)
 
     return logger
 
@@ -572,7 +600,7 @@ class Lock:
                     msvcrt.locking(self.fh.fileno(), msvcrt.LK_NBLCK, 1)
                 else:
                     fcntl.flock(self.fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    print("Acquired lock")
+                    logger.debug("Acquired lock")
             except (IOError, BlockingIOError, PermissionError) as e:
                 raise
 
@@ -583,7 +611,7 @@ class Lock:
                     msvcrt.locking(self.fh.fileno(), msvcrt.LK_UNLCK, 1)
                 else:
                     fcntl.flock(self.fh, fcntl.LOCK_UN)
-                    print("released lock")
+                    logger.debug("Released lock")
             except (IOError, BlockingIOError, PermissionError) as e:
                 raise
 

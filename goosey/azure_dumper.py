@@ -827,8 +827,7 @@ class AzureDataDumper(DataDumper):
                 await asyncio.sleep(0) # make it blocking so that other coroutines can continue
 
             except HttpResponseError as e:
-                print(e)
-                self.logger.debug("Caught HTTP Response Error on subscription " + self.subscription_id_list[i])
+                self.logger.error(f"HTTP Response Error on subscription {self.subscription_id_list[i]}: {e}")
                 continue
 
     async def dump_log_analytic_workspaces(self):
