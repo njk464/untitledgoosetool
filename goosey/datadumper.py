@@ -10,7 +10,7 @@ class DataDumper(object):
         self.reports_dir = reports_dir
         self.ahsession = session
         self.app_auth = app_auth
-        self.logger = setup_logger(__name__, debug)
+        self.logger = setup_logger(type(self).__module__, debug)
 
     def get_session(self):
         return self.ahsession

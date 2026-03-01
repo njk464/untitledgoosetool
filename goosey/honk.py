@@ -5,9 +5,7 @@
 This module performs data collection of various data sources from an Azure/M365 environment.
 """
 
-from mimetypes import init
 import aiohttp
-import argparse
 import asyncio
 import configparser
 import json
@@ -129,11 +127,7 @@ async def run(args, config, auth, init_sections, auth_un_pw=None):
             sys.exit(1)
 
 def _get_section_dict(config, s):
-    try:
-        return dict([(x[0], x[1].lower()=='true') for x in config.items(s)])
-    except Exception as e:
-        logger.warning(f'Error getting section dictionary from config: {str(e)}')
-    return {}
+    return get_section_dict(config, s, logger)
 
 def parse_config(configfile, args, auth=None):
     global data_calls
@@ -255,7 +249,6 @@ def autohonk(authfile=".ugt_auth",
         output_dir: Directory for storing the results
         reports_dir: Directory for storing debugging/informational logs
         debug: Enable debug logging
-        dry_run: Dry run (do not do any API calls)
         azure: Set all of the Azure calls to true
         entraid: Set all of the Entra ID calls to true
         m365: Set all of the M365 calls to true

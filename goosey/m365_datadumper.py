@@ -9,8 +9,6 @@ import asyncio
 import csv
 import json
 import os
-import requests
-import subprocess
 import sys
 import time
 import urllib.parse
@@ -38,7 +36,7 @@ class M365DataDumper(DataDumper):
         self.failurefile = os.path.join(reports_dir, '_no_results.json')
         self.ual_bounds_state = []
         self.o365_app_auth = o365_app_auth
-        self.a_THRESHOLD = int(config_get(config, 'variables', 'ual_threshold'))
+        self.threshold = int(config_get(config, 'variables', 'ual_threshold'))
         self.max_ual_tasks = max(1,int(config_get(config, 'variables', 'max_ual_tasks')))
         self.ual_extra_start = config_get(config, 'variables', 'ual_extra_start')
         self.ual_extra_end = config_get(config, 'variables', 'ual_extra_end')
@@ -46,16 +44,7 @@ class M365DataDumper(DataDumper):
         self.ual_tasks = []
         self.ual_results_cache = [] # used to store results in case of cross query interference
         self.ual_pbar = None
-        filters = config_get(config, 'filters', 'date_start', logger=self.logger)
-        if filters != '' and  filters is not None:
-            self.date_range=True
-            self.date_start = config_get(config, 'filters', 'date_start')
-            if config_get(config, 'filters', 'date_end') != '':
-                self.date_end = config_get(config, 'filters', 'date_end')
-            else:
-                self.date_end = datetime.now().strftime("%Y-%m-%d")
-        else:
-            self.date_range=False
+        self.date_range, self.date_start, self.date_end = get_date_range(config, self.logger)
 
         self.call_object = [self.endpoints["graph_api"] + "/beta/", self.app_auth, self.logger, self.output_dir, self.get_session()]
 
@@ -66,7 +55,7 @@ class M365DataDumper(DataDumper):
         access_token = self.o365_app_auth["access_token"]
         headers = {
                'Prefer': 'odata.maxpagesize=1000',
-               'X-AnchorMailbox': "SystemMailbox{bb558c35-97f1-4cb9-8ff7-d53741dc928c}",
+               'X-AnchorMailbox': EXO_ANCHOR_MAILBOX,
                'Accept': 'application/json',
                'Content-Type': 'application/json',
                'Authorization': f"Bearer {access_token}",
@@ -295,17 +284,11 @@ class M365DataDumper(DataDumper):
         """
         await self.save_exo_cmdlet("Get-App", "EXO_AddIns.json", Parameters={"OrganizationApp": "True", "PrivateCatalog": "True"}, remove_fields=["ManifestXml"])
 
+    @requires_auth
     async def dump_exo_inboxrules(self) -> None:
         """
         Get all the messageRule objects defined for all users' inboxes
         """
-        if 'token_type' not in self.app_auth or 'access_token' not in self.app_auth:
-            self.logger.error("Missing token_type and access_token from auth. Did you auth correctly? (Skipping dump_exo_inboxrules)")
-            return
-
-        if check_app_auth_token(self.app_auth, self.logger):
-            return
-
         outfile = os.path.join(self.output_dir, 'users.json')
         if os.path.exists(outfile):
             data = [json.loads(line) for line in open (outfile, 'r')]
@@ -561,7 +544,7 @@ class M365DataDumper(DataDumper):
             # continue the session if this is a created task
             if not continuing:
                 session_results = []
-                sessionId = str(random.randint(1337, 9999999))
+                sessionId = str(random.randint(SESSION_ID_MIN, SESSION_ID_MAX))
             continuing = False
             sessionCount = -1
             session_set = set() # Unique results returned. Used to detect duplicates
@@ -694,8 +677,8 @@ class M365DataDumper(DataDumper):
                                        "done_status": False}, boundsfile=boundsfile)
 
                     # check if within log threshold and the time difference is greater than 2 seconds
-                    if sessionCount > self.a_THRESHOLD and end - start >= timedelta(seconds=2):
-                        self.logger.debug(f"{sessionCount} results found within bounds. Exceeds result limit {self.a_THRESHOLD}")
+                    if sessionCount > self.threshold and end - start >= timedelta(seconds=2):
+                        self.logger.debug(f"{sessionCount} results found within bounds. Exceeds result limit {self.threshold}")
                         # half the difference between the start and end time
                         new_end_ts = start.timestamp() + ((end.timestamp() - start.timestamp())/2)
                         end = datetime.fromtimestamp(new_end_ts).replace(microsecond=0)
@@ -722,7 +705,7 @@ class M365DataDumper(DataDumper):
                 elif status_code == 500:
                     self.logger.debug(f'\t[-] Services aren\'t available right now, sleeping for 30 seconds before retrying...')
                     self.logger.debug(str(response))
-                    asyncio.sleep(30)
+                    await asyncio.sleep(30)
                     tries += 1
                     break
                 else:
@@ -736,17 +719,7 @@ class M365DataDumper(DataDumper):
             # Check to see if the search was successful and the total results captured matches the ResultCount
             # from the session
             if status_code == 200 and len(session_results) == sessionCount:
-                # Remove the duplicates
-                new_session_results = []
                 response_count += len(session_results)
-#                if len(session_set) != len(session_results):
-#                    total_duplicates += len(session_results) - len(session_results)
-#                    for result in session_results:
-#                        result_id = json.loads(result["AuditData"])["Id"]
-#                        if result_id in session_set:
-#                            session_set.remove(result_id)
-#                            new_session_results.append(result)
-#                    session_results = new_session_results
                 # save output for current session
                 if len(session_results) > 0:
                     session_filename = f"ual_{startDate}_{endDate}.json".replace(":", "_")

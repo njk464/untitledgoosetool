@@ -22,7 +22,6 @@ from collections import namedtuple
 from goosey.utils import *
 
 green = "\x1b[1;32m"
-bold_red = "\x1b[31;1m"
 
 class Authentication():
     """
@@ -87,7 +86,7 @@ class Authentication():
         config.read(configfile)
         if not self.d4iot:
             self.tenant = config_get(config, 'config', 'tenant', self.logger)
-            self.gcc = config_get(config, 'config', 'gcc', self.logger).lower == "true"
+            self.gcc = config_get(config, 'config', 'gcc', self.logger).lower() == "true"
             self.gcc_high = config_get(config, 'config', 'gcc_high', self.logger).lower() == "true"
             self.subscriptions = config_get(config, 'config', 'subscriptionid', self.logger)
             self.endpoints_dict = get_endpoints(gcc=self.gcc, gcc_high=self.gcc_high)

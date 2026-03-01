@@ -16,7 +16,9 @@ from goosey.m365_datadumper import M365DataDumper
 from goosey.azure_dumper import AzureDataDumper
 from goosey.mde_datadumper import MDEDataDumper
 
-def genconfstring(args, docstring_params, section_name, prefix, config_dict={}):
+def genconfstring(args, docstring_params, section_name, prefix, config_dict=None):
+    if config_dict is None:
+        config_dict = {}
     conf_s = f"[{section_name}]\n"
     for arg_key in args.keys():
         if arg_key.startswith(prefix):
@@ -72,8 +74,8 @@ def genconf(outpath_auth=".auth",
             d4iotconf_d4iot_sensor_ip=None,
             d4iotconf_d4iot_mgmt_ip=None,
             d4iot=False,
-            dict_config={},
-            d4iot_dict_config={},
+            dict_config=None,
+            d4iot_dict_config=None,
             new=False,
             insecure=False,
             debug=False):
@@ -116,6 +118,10 @@ def genconf(outpath_auth=".auth",
         insecure: Disable secure authentication handling (file encryption)
         debug: Enable debug logging
     """
+    if dict_config is None:
+        dict_config = {}
+    if d4iot_dict_config is None:
+        d4iot_dict_config = {}
     # Grab arguments as a dictionary object
     args = locals()
     # parse the docstring for arguments so they can be used as comments

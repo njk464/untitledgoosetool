@@ -10,7 +10,7 @@ import getpass
 import json
 import os
 import pytz
-import inspect
+import sys
 from pathvalidate import sanitize_filename
 
 from azure.core.exceptions import *
@@ -26,9 +26,7 @@ from azure.mgmt.web import WebSiteManagementClient
 from azure.storage.blob import BlobServiceClient
 from goosey.datadumper import DataDumper
 from goosey.utils import *
-from http.client import CONTINUE
-from re import S, sub
-from typing import NewType, Optional
+from typing import Optional
 
 utc = pytz.UTC
 
@@ -52,11 +50,11 @@ class AzureDataDumper(DataDumper):
              self.app_id = input("Please type your application client id: ")
              self.client_secret = getpass.getpass("Please type your client secret: ")
         self.tenant = config['config']['tenant']
-        self.us_gov = config['config']['gcc_high']
+        self.gcc_high = config['config']['gcc_high']
         gcc = config['config']['gcc'].lower() == "true"
         gcc_high = config['config']['gcc_high'].lower() == "true"
         self.endpoints = get_endpoints(gcc=gcc,gcc_high=gcc_high)
-        if self.us_gov.lower() == "true":
+        if self.gcc_high.lower() == "true":
             self.authority = AzureAuthorityHosts.AZURE_GOVERNMENT
         else:
             self.authority = AzureAuthorityHosts.AZURE_PUBLIC_CLOUD
@@ -70,7 +68,7 @@ class AzureDataDumper(DataDumper):
         self.credential = ClientSecretCredential(tenant_id=self.tenant, client_id=self.app_id, client_secret=self.client_secret, authority=self.authority, logging_enable=True)
 
         if config['config']['subscriptionid'].lower() == "all":
-            if self.us_gov.lower() == "true":
+            if self.gcc_high.lower() == "true":
                 self.subscription_client = SubscriptionClient(self.credential, base_url='https://management.usgovcloudapi.net', credential_scopes=['https://management.usgovcloudapi.net/.default'])
             else:
                 self.subscription_client = SubscriptionClient(self.credential)
@@ -96,8 +94,8 @@ class AzureDataDumper(DataDumper):
         for sub_id in self.subscription_id_list:
             sub_id = sub_id.strip()
 
-            if self.us_gov.lower() == "true":
-                location = 'USGov Virginia'
+            if self.gcc_high.lower() == "true":
+                location = USGOV_LOCATION
                 self.network_managers.append(NetworkManagementClient(credential=self.credential, subscription_id=sub_id, base_url='https://management.usgovcloudapi.net', credential_scopes=['https://management.usgovcloudapi.net/.default']))
                 self.compute_clients.append(ComputeManagementClient(credential=self.credential, subscription_id=sub_id, base_url='https://management.usgovcloudapi.net', credential_scopes=['https://management.usgovcloudapi.net/.default']))
                 self.web_clients.append(WebSiteManagementClient(credential=self.credential, subscription_id=sub_id, base_url='https://management.usgovcloudapi.net', credential_scopes=['https://management.usgovcloudapi.net/.default']))
@@ -119,26 +117,26 @@ class AzureDataDumper(DataDumper):
                 self.asclocation = locationclient.locations.list().next().as_dict()
                 self.security_clients.append(SecurityCenter(credential=self.credential, subscription_id=sub_id, asc_location=self.asclocation))
 
-        filters = config_get(config, 'filters', 'date_start', logger=self.logger)
-        self.logger.debug(f"Filters are {filters}")
-        if filters != '' and  filters is not None:
-            self.date_range = True
-            self.date_start = config['filters']['date_start']
-            if config['filters']['date_end'] != '':
-                self.date_end = config['filters']['date_end']
-            else:
-                self.date_end = datetime.now().strftime("%Y-%m-%d")
-        else:
-            self.date_range=False
+        self.date_range, self.date_start, self.date_end = get_date_range(config, self.logger)
+
+    def _get_mgmt_url(self, path):
+        """Return the management API URL based on gov/commercial cloud."""
+        if self.gcc_high.lower() == "true":
+            return "https://management.azure.us" + path
+        return "https://management.azure.com" + path
+
+    def _make_auth_header(self):
+        """Return standard auth header dict."""
+        return {
+            'Authorization': '%s %s' % (self.app_auth['token_type'], self.app_auth['access_token']),
+            'Content-type': 'application/json'
+        }
 
     async def dump_d4iot_portal_pcap(self) -> None:
         """
         Dump D4IOT portal pcaps from alerts
         """
-        header = {
-            'Authorization': '%s %s' % (self.app_auth['token_type'], self.app_auth['access_token']),
-            'Content-type': 'application/json'
-            }
+        header = self._make_auth_header()
 
         for subscriptionId in self.subscription_id_list:
             self.logger.info("Getting D4IOT portal pcaps from " + subscriptionId + "...")
@@ -148,10 +146,7 @@ class AzureDataDumper(DataDumper):
             devgrps_outfile = os.path.join(self.output_dir, subscriptionId, 'd4iot_portal', "portal_device_groups.json")
 
             locations = []
-            if self.us_gov.lower() == "true":
-                loc_url = "https://management.azure.us/subscriptions/" + subscriptionId + "/providers/Microsoft.IoTSecurity/locations?api-version=2021-09-01-preview"
-            else:
-                loc_url = "https://management.azure.com/subscriptions/" + subscriptionId + "/providers/Microsoft.IoTSecurity/locations?api-version=2021-09-01-preview"
+            loc_url = self._get_mgmt_url("/subscriptions/" + subscriptionId + "/providers/Microsoft.IoTSecurity/locations?api-version=2021-09-01-preview")
 
             async with self.ahsession.request('GET', loc_url, headers=header, ssl=False) as r:
                 result = await r.json()
@@ -169,10 +164,7 @@ class AzureDataDumper(DataDumper):
 
             for location in locations:
                 device_grps = []
-                if self.us_gov.lower() == "true":
-                    devgrp_url = "https://management.azure.us/subscriptions/" + subscriptionId + "/providers/Microsoft.IoTSecurity/locations/" + location + "/deviceGroups?api-version=2021-02-01-preview"
-                else:
-                    devgrp_url = "https://management.azure.com/subscriptions/" + subscriptionId + "/providers/Microsoft.IoTSecurity/locations/" + location + "/deviceGroups?api-version=2021-02-01-preview"
+                devgrp_url = self._get_mgmt_url("/subscriptions/" + subscriptionId + "/providers/Microsoft.IoTSecurity/locations/" + location + "/deviceGroups?api-version=2021-02-01-preview")
 
                 async with self.ahsession.request('GET', devgrp_url, headers=header, ssl=False) as r:
                     result = await r.json()
@@ -190,16 +182,10 @@ class AzureDataDumper(DataDumper):
 
                 alert_ids = []
                 for val in device_grps:
-                    if self.us_gov.lower() == "true":
-                        url = "https://management.azure.us/subscriptions/" + subscriptionId + "/providers/Microsoft.IoTSecurity/locations/" + location + "/deviceGroups/" + val + "/alerts?api-version=2021-07-01-preview"
-                    else:
-                        url = "https://management.azure.com/subscriptions/" + subscriptionId + "/providers/Microsoft.IoTSecurity/locations/" + location + "/deviceGroups/" + val + "/alerts?api-version=2021-07-01-preview"
+                    url = self._get_mgmt_url("/subscriptions/" + subscriptionId + "/providers/Microsoft.IoTSecurity/locations/" + location + "/deviceGroups/" + val + "/alerts?api-version=2021-07-01-preview")
 
                     async with self.ahsession.request('GET', url, headers=header, ssl=False) as r:
                         result = await r.json()
-                        # nexturl = None
-                        # if '@odata.nextLink' in result:
-                        #     nexturl = result['@odata.nextLink']
                         if 'value' in result:
                             for x in result['value']:
                                 createdAt = dateutil.parser.parse(x["systemData"]["createdAt"]).replace(tzinfo=None)
@@ -218,10 +204,7 @@ class AzureDataDumper(DataDumper):
                                 sys.exit(1)
 
                 for id in alert_ids:
-                    if self.us_gov.lower() == "true":
-                        availability_url =  "https://management.azure.us" + id + "/pcapAvailability?api-version=2021-07-01-preview"
-                    else:
-                        availability_url =  "https://management.azure.com" + id + "/pcapAvailability?api-version=2021-07-01-preview"
+                    availability_url = self._get_mgmt_url(id + "/pcapAvailability?api-version=2021-07-01-preview")
                     i = id.split("/")[-1]
                     outfile = os.path.join(pcap_dir, "pcap_" + str(i) + ".pcap")
                     async with self.ahsession.request('POST', availability_url, headers=header, ssl=False) as r:
@@ -252,10 +235,7 @@ class AzureDataDumper(DataDumper):
                                 else:
                                     self.logger.debug("PCAP available for alert id %s." % (i))
 
-                                if self.us_gov.lower() == "true":
-                                    request_url = "https://management.azure.us" + id + "/pcapRequest?api-version=2021-07-01-preview"
-                                else:
-                                    request_url = "https://management.azure.com" + id + "/pcapRequest?api-version=2021-07-01-preview"
+                                request_url = self._get_mgmt_url(id + "/pcapRequest?api-version=2021-07-01-preview")
 
                                 status = None
 
@@ -288,10 +268,7 @@ class AzureDataDumper(DataDumper):
         """
         Dump d4iot portal alerts
         """
-        header = {
-            'Authorization': '%s %s' % (self.app_auth['token_type'], self.app_auth['access_token']),
-            'Content-type': 'application/json'
-            }
+        header = self._make_auth_header()
 
         for subscriptionId in self.subscription_id_list:
 
@@ -307,10 +284,7 @@ class AzureDataDumper(DataDumper):
                 self.logger.debug("D4IOT portal alerts files exists.. Proceeding without pulling.")
             else:
                 locations = []
-                if self.us_gov.lower() == "true":
-                    loc_url = "https://management.azure.us/subscriptions/" + subscriptionId + "/providers/Microsoft.IoTSecurity/locations?api-version=2021-09-01-preview"
-                else:
-                    loc_url = "https://management.azure.com/subscriptions/" + subscriptionId + "/providers/Microsoft.IoTSecurity/locations?api-version=2021-09-01-preview"
+                loc_url = self._get_mgmt_url("/subscriptions/" + subscriptionId + "/providers/Microsoft.IoTSecurity/locations?api-version=2021-09-01-preview")
 
                 async with self.ahsession.request('GET', loc_url, headers=header, ssl=False) as r:
                     result = await r.json()
@@ -321,14 +295,11 @@ class AzureDataDumper(DataDumper):
                         if result['error']['code'] == 'ExpiredAuthenticationToken':
                             self.logger.error("Error with authentication token: " + result['error']['message'])
                             self.logger.error("Please re-auth.")
-                            os._exit(1)
+                            sys.exit(1)
 
                 for location in locations:
                     device_grps = []
-                    if self.us_gov.lower() == "true":
-                        devgrp_url = "https://management.azure.us/subscriptions/" + subscriptionId + "/providers/Microsoft.IoTSecurity/locations/" + location + "/deviceGroups?api-version=2021-02-01-preview"
-                    else:
-                        devgrp_url = "https://management.azure.com/subscriptions/" + subscriptionId + "/providers/Microsoft.IoTSecurity/locations/" + location + "/deviceGroups?api-version=2021-02-01-preview"
+                    devgrp_url = self._get_mgmt_url("/subscriptions/" + subscriptionId + "/providers/Microsoft.IoTSecurity/locations/" + location + "/deviceGroups?api-version=2021-02-01-preview")
 
                     async with self.ahsession.request('GET', devgrp_url, headers=header, ssl=False) as r:
                         result = await r.json()
@@ -344,13 +315,10 @@ class AzureDataDumper(DataDumper):
                             if result['error']['code'] == 'ExpiredAuthenticationToken':
                                 self.logger.error("Error with authentication token: " + result['error']['message'])
                                 self.logger.error("Please re-auth.")
-                                os._exit(1)
+                                sys.exit(1)
 
                     for val in device_grps:
-                        if self.us_gov.lower() == "true":
-                            url = "https://management.azure.us/subscriptions/" + subscriptionId + "/providers/Microsoft.IoTSecurity/locations/" + location + "/deviceGroups/" + val + "/alerts?api-version=2021-07-01-preview"
-                        else:
-                            url = "https://management.azure.com/subscriptions/" + subscriptionId + "/providers/Microsoft.IoTSecurity/locations/" + location + "/deviceGroups/" + val + "/alerts?api-version=2021-07-01-preview"
+                        url = self._get_mgmt_url("/subscriptions/" + subscriptionId + "/providers/Microsoft.IoTSecurity/locations/" + location + "/deviceGroups/" + val + "/alerts?api-version=2021-07-01-preview")
 
                         async with self.ahsession.request('GET', url, headers=header, ssl=False) as r:
                             result = await r.json()
@@ -367,7 +335,7 @@ class AzureDataDumper(DataDumper):
                                 if result['error']['code'] == 'ExpiredAuthenticationToken':
                                     self.logger.error("Error with authentication token: " + result['error']['message'])
                                     self.logger.error("Please re-auth.")
-                                    os._exit(1)
+                                    sys.exit(1)
                             await get_nextlink(nexturl, outfile, self.ahsession, self.logger, self.app_auth)
                 self.logger.info("Finished getting D4IOT portal alerts from " + subscriptionId + ".")
 
@@ -375,10 +343,7 @@ class AzureDataDumper(DataDumper):
         """
         Dump d4iot portal defender settings
         """
-        header = {
-            'Authorization': '%s %s' % (self.app_auth['token_type'], self.app_auth['access_token']),
-            'Content-type': 'application/json'
-            }
+        header = self._make_auth_header()
 
         for subscriptionId in self.subscription_id_list:
             self.logger.info("Getting D4IOT portal defender settings from " + subscriptionId + "...")
@@ -390,10 +355,7 @@ class AzureDataDumper(DataDumper):
             if os.path.exists(outfile):
                 self.logger.debug("D4IOT portal defender settings file exists.. Proceeding without pulling.")
             else:
-                if self.us_gov.lower() == "true":
-                    url = "https://management.azure.us/subscriptions/" + subscriptionId + "/providers/Microsoft.IoTSecurity/defenderSettings?api-version=2021-02-01-preview"
-                else:
-                    url = "https://management.azure.com/subscriptions/" + subscriptionId + "/providers/Microsoft.IoTSecurity/defenderSettings?api-version=2021-02-01-preview"
+                url = self._get_mgmt_url("/subscriptions/" + subscriptionId + "/providers/Microsoft.IoTSecurity/defenderSettings?api-version=2021-02-01-preview")
 
                 async with self.ahsession.request('GET', url, headers=header, ssl=False) as r:
                     result = await r.json()
@@ -407,7 +369,7 @@ class AzureDataDumper(DataDumper):
                         if result['error']['code'] == 'ExpiredAuthenticationToken':
                             self.logger.error("Error with authentication token: " + result['error']['message'])
                             self.logger.error("Please re-auth.")
-                            os._exit(1)
+                            sys.exit(1)
 
                 self.logger.info("Finished getting D4IOT portal defender settings from " + subscriptionId + ".")
 
@@ -415,10 +377,7 @@ class AzureDataDumper(DataDumper):
         """
         Dump d4iot portal sensors
         """
-        header = {
-            'Authorization': '%s %s' % (self.app_auth['token_type'], self.app_auth['access_token']),
-            'Content-type': 'application/json'
-            }
+        header = self._make_auth_header()
 
         for subscriptionId in self.subscription_id_list:
             self.logger.info("Getting D4IOT portal sensors from " + subscriptionId + "...")
@@ -431,10 +390,7 @@ class AzureDataDumper(DataDumper):
             onsite_outfile = os.path.join(new_outfile, "portal_onpremise_sensors.json")
 
             locations = []
-            if self.us_gov.lower() == "true":
-                loc_url = "https://management.azure.us/subscriptions/" + subscriptionId + "/providers/Microsoft.IoTSecurity/locations?api-version=2021-09-01-preview"
-            else:
-                loc_url = "https://management.azure.com/subscriptions/" + subscriptionId + "/providers/Microsoft.IoTSecurity/locations?api-version=2021-09-01-preview"
+            loc_url = self._get_mgmt_url("/subscriptions/" + subscriptionId + "/providers/Microsoft.IoTSecurity/locations?api-version=2021-09-01-preview")
             async with self.ahsession.request('GET', loc_url, headers=header, ssl=False) as r:
                 result = await r.json()
                 if 'value' in result:
@@ -444,14 +400,11 @@ class AzureDataDumper(DataDumper):
                     if result['error']['code'] == 'ExpiredAuthenticationToken':
                         self.logger.error("Error with authentication token: " + result['error']['message'])
                         self.logger.error("Please re-auth.")
-                        os._exit(1)
+                        sys.exit(1)
 
             for location in locations:
                 sites = []
-                if self.us_gov.lower() == "true":
-                    sites_url = "https://management.azure.us/subscriptions/" + subscriptionId + "/providers/Microsoft.IoTSecurity/locations/" + location + "/sites?api-version=2021-09-01-preview"
-                else:
-                    sites_url = "https://management.azure.com/subscriptions/" + subscriptionId + "/providers/Microsoft.IoTSecurity/locations/" + location + "/sites?api-version=2021-09-01-preview"
+                sites_url = self._get_mgmt_url("/subscriptions/" + subscriptionId + "/providers/Microsoft.IoTSecurity/locations/" + location + "/sites?api-version=2021-09-01-preview")
 
                 async with self.ahsession.request('GET', sites_url, headers=header, ssl=False) as r:
                     result = await r.json()
@@ -467,13 +420,10 @@ class AzureDataDumper(DataDumper):
                         if result['error']['code'] == 'ExpiredAuthenticationToken':
                             self.logger.error("Error with authentication token: " + result['error']['message'])
                             self.logger.error("Please re-auth.")
-                            os._exit(1)
+                            sys.exit(1)
 
                 for val in sites:
-                    if self.us_gov.lower() == "true":
-                        url = "https://management.azure.us/subscriptions/" + subscriptionId + "/providers/Microsoft.IoTSecurity/locations/" + location + "/sites/" + val + "/sensors?api-version=2021-09-01-preview"
-                    else:
-                        url = "https://management.azure.com/subscriptions/" + subscriptionId + "/providers/Microsoft.IoTSecurity/locations/" + location + "/sites/" + val + "/sensors?api-version=2021-09-01-preview"
+                    url = self._get_mgmt_url("/subscriptions/" + subscriptionId + "/providers/Microsoft.IoTSecurity/locations/" + location + "/sites/" + val + "/sensors?api-version=2021-09-01-preview")
                     async with self.ahsession.request('GET', url, headers=header, ssl=False) as r:
                         result = await r.json()
                         nexturl = None
@@ -489,7 +439,7 @@ class AzureDataDumper(DataDumper):
                             if result['error']['code'] == 'ExpiredAuthenticationToken':
                                 self.logger.error("Error with authentication token: " + result['error']['message'])
                                 self.logger.error("Please re-auth.")
-                                os._exit(1)
+                                sys.exit(1)
                         await get_nextlink(nexturl, outfile, self.ahsession, self.logger, self.app_auth)
             self.logger.info("Finished getting D4IOT portal sensors settings from " + subscriptionId + ".")
 
@@ -531,9 +481,9 @@ class AzureDataDumper(DataDumper):
 
                         except HttpResponseError as e:
                             continue
-                    await asyncio.sleep(0) # make it blocking so that other coroutines can continue
+                    await asyncio.sleep(0)  # yield to event loop
                 self.logger.info("Finished geting diagnostic settings from " + sub_id + ".")
-            await asyncio.sleep(0) # make it blocking so that other coroutines can continue
+            await asyncio.sleep(0)  # yield to event loop
 
     async def _dump_vm_config(self) -> None:
         """
@@ -562,10 +512,10 @@ class AzureDataDumper(DataDumper):
                                 f.write("\n")
                                 f.flush()
                                 os.fsync(f)
-                        await asyncio.sleep(0) # make it blocking so that other coroutines can continue
+                        await asyncio.sleep(0)  # yield to event loop
 
                     self.logger.info("Finished geting virtual machine configurations from " + sub_id + ".")
-                await asyncio.sleep(0) # make it blocking so that other coroutines can continue
+                await asyncio.sleep(0)  # yield to event loop
             except HttpResponseError:
                 self.logger.debug("Caught HTTP Response Error on subscription " + sub_id)
                 continue
@@ -596,8 +546,8 @@ class AzureDataDumper(DataDumper):
                                     f.write("\n")
                                     f.flush()
                                     os.fsync(f)
-                                await asyncio.sleep(0) # make it blocking so that other coroutines can continue
-                        await asyncio.sleep(0) # make it blocking so that other coroutines can continue
+                                await asyncio.sleep(0)  # yield to event loop
+                        await asyncio.sleep(0)  # yield to event loop
 
                     self.logger.info('Finished getting all web app Azure Container Configs for ' + sub_id + '.')
             except HttpResponseError:
@@ -622,7 +572,7 @@ class AzureDataDumper(DataDumper):
                         f.write("\n")
                         f.flush()
                         os.fsync(f)
-                    await asyncio.sleep(0) # make it blocking so that other coroutines can continue
+                    await asyncio.sleep(0)  # yield to event loop
                 self.logger.info('Finished getting all Azure Subscriptions.')
             except Exception as e:
                 self.logger.error(f"Error getting subscriptions: {str(e)}\nDo you have the right credentials in your .conf file?")
@@ -656,11 +606,11 @@ class AzureDataDumper(DataDumper):
                                         f.write("\n")
                                         f.flush()
                                         os.fsync(f)
-                                await asyncio.sleep(0) # make it blocking so that other coroutines can continue
-                        await asyncio.sleep(0) # make it blocking so that other coroutines can continue
+                                await asyncio.sleep(0)  # yield to event loop
+                        await asyncio.sleep(0)  # yield to event loop
 
                     self.logger.info('Finished dumping all file shares for' + sub_id + '.')
-                    await asyncio.sleep(0) # make it blocking so that other coroutines can continue
+                    await asyncio.sleep(0)  # yield to event loop
             except HttpResponseError:
                 self.logger.debug("Caught HTTP Response Error on subscription " + sub_id)
                 continue
@@ -691,7 +641,7 @@ class AzureDataDumper(DataDumper):
                                 os.fsync(f)
 
                     self.logger.info('Finished getting all azure resources information for ' + sub_id + '.')
-                    await asyncio.sleep(0) # make it blocking so that other coroutines can continue
+                    await asyncio.sleep(0)  # yield to event loop
             except HttpResponseError:
                 self.logger.debug("Caught HTTP Response Error on subscription " + sub_id)
                 continue
@@ -721,12 +671,12 @@ class AzureDataDumper(DataDumper):
                                 f.flush()
                                 os.fsync(f)
                 self.logger.info('Finished getting all Azure storage account information for ' + sub_id + '.')
-                await asyncio.sleep(0) # make it blocking so that other coroutines can continue
+                await asyncio.sleep(0)  # yield to event loop
             except HttpResponseError:
                 self.logger.debug("Caught HTTP Response Error on subscription " + sub_id)
                 continue
 
-    async def auxillary_activity_log(self, start, end, i, statefile=None):
+    async def auxiliary_activity_log(self, start, end, i, statefile=None):
         sub_id = self.subscription_id_list[i]
         monitor_client = self.monitor_clients[i]
         self.logger.info('Dumping Azure Activity Log for ' + sub_id +'...')
@@ -753,10 +703,10 @@ class AzureDataDumper(DataDumper):
                     f.write("\n")
                     f.flush()
                     os.fsync(f)
-                    await asyncio.sleep(0) # make it blocking so that other coroutines can continue
+                    await asyncio.sleep(0)  # yield to event loop
             with open(statefile, 'w') as f:
                 f.write(end_time)
-            await asyncio.sleep(0) # make it blocking so that other coroutines can continue
+            await asyncio.sleep(0)  # yield to event loop
 
             start = '%sT00:00:00.000000Z' % ((datetime.strptime(start, ("%Y-%m-%dT%H:%M:%S.%fZ")).date() + timedelta(days=1)).strftime("%Y-%m-%d"))
             start_datetime = dateutil.parser.parse(start).replace(tzinfo=None)
@@ -816,15 +766,15 @@ class AzureDataDumper(DataDumper):
             try:
                 if save_state:
                     self.logger.debug(f'Using Saved State {start_time_saved_sub} - {end_time_saved_sub}')
-                    await self.auxillary_activity_log(start_time_saved_sub, end_time_saved_sub, i, statefile)
+                    await self.auxiliary_activity_log(start_time_saved_sub, end_time_saved_sub, i, statefile)
                     save_state = False
                 elif self.date_range:
                     self.logger.debug(f'Using Date Range {self.date_start} - {self.date_end}')
-                    await self.auxillary_activity_log(self.date_start, self.date_end, i, statefile)
+                    await self.auxiliary_activity_log(self.date_start, self.date_end, i, statefile)
                 else:
                     self.logger.debug(f'No state. Using {start_date} - {final_time}')
-                    await self.auxillary_activity_log(start_date, final_time, i, statefile)
-                await asyncio.sleep(0) # make it blocking so that other coroutines can continue
+                    await self.auxiliary_activity_log(start_date, final_time, i, statefile)
+                await asyncio.sleep(0)  # yield to event loop
 
             except HttpResponseError as e:
                 self.logger.error(f"HTTP Response Error on subscription {self.subscription_id_list[i]}: {e}")
@@ -956,13 +906,13 @@ class AzureDataDumper(DataDumper):
 
             # Run a search to get a summary of the timeframe. Faster and provides more info
             if bounds[0]["count"] == None or \
-               (bounds[0]["count"] >= 10000 and end <= bounds[0]["end"]):
+               (bounds[0]["count"] >= LAW_QUERY_THRESHOLD and end <= bounds[0]["end"]):
                 summary, err, end, bounds = await run_kql_query(base_query, start, end, bounds, url, self.loganalytics_app_auth, self.logger, self.ahsession, summarize=True)
                 if err:
                     tries += 1
                     continue
                 tries = 0
-                if summary[0]["Count"] >= 10000:
+                if summary[0]["Count"] >= LAW_QUERY_THRESHOLD:
                     continue
                 if summary[0]["Count"] == 0:
                     end = bounds[0]["end"]
@@ -987,12 +937,12 @@ class AzureDataDumper(DataDumper):
                 tries = 0
                 end = bounds[0]["end"]
                 start = bounds[0]["start"]
-                if bounds[0]["count"] != None and bounds[0]["count"] >= 10000:
+                if bounds[0]["count"] != None and bounds[0]["count"] >= LAW_QUERY_THRESHOLD:
                     new_end_ts = start.timestamp() + ((end.timestamp() - start.timestamp())/2)
                     end = datetime.fromtimestamp(new_end_ts, utc)
 
 
-    async def auxillary_storage_log_pull(self, container_name, log_type):
+    async def auxiliary_storage_log_pull(self, container_name, log_type):
         for i in range(0, len(self.subscription_id_list)):
             try:
                 sub_id = self.subscription_id_list[i]
@@ -1012,7 +962,7 @@ class AzureDataDumper(DataDumper):
                     if os.path.exists(save_state_path):
                         self.logger.debug(save_state_path)
                         save_state_set = set(json.load(open(save_state_path, "r"))["set"])
-                    if self.us_gov.lower() == "true":
+                    if self.gcc_high.lower() == "true":
                         url = "https://" + account + ".blob.core.usgovcloudapi.net/"
                         blob_service_client = BlobServiceClient(account_url=url, credential=self.credential)
                     else:
@@ -1049,15 +999,15 @@ class AzureDataDumper(DataDumper):
                                             f.write(entry)
                                 save_state_set.add(str(blob.name))
                                 json.dump({"set": list(save_state_set)}, open(save_state_path, "w"))
-                            await asyncio.sleep(0) # make it blocking so that other coroutines can continue
+                            await asyncio.sleep(0)  # yield to event loop
 
 
 
                     except HttpResponseError as e:
                         self.logger.debug(log_type + " log not present in " + account + " continuing.")
-                        await asyncio.sleep(0) # make it blocking so that other coroutines can continue
+                        await asyncio.sleep(0)  # yield to event loop
                         continue
-                    await asyncio.sleep(0) # make it blocking so that other coroutines can continue
+                    await asyncio.sleep(0)  # yield to event loop
                     self.logger.info("Finished dumping " + log_type + " logs from blob storage.")
 
             except HttpResponseError as e:
@@ -1068,21 +1018,21 @@ class AzureDataDumper(DataDumper):
         """
         Dump insights audit events for key_vault
         """
-        await self.auxillary_storage_log_pull("insights-logs-auditevent", "key_vault")
+        await self.auxiliary_storage_log_pull("insights-logs-auditevent", "key_vault")
 
     async def dump_nsg_flow_logs(self):
         """
         Dump insights network security group flow events
         """
-        await self.auxillary_storage_log_pull("insights-logs-networksecuritygroupflowevent", "nsg_flow")
+        await self.auxiliary_storage_log_pull("insights-logs-networksecuritygroupflowevent", "nsg_flow")
 
     async def dump_bastion_logs(self):
         """
         Dump insights bastion audit logs
         """
-        await self.auxillary_storage_log_pull("insights-logs-bastionauditlogs", "bastion")
+        await self.auxiliary_storage_log_pull("insights-logs-bastionauditlogs", "bastion")
 
-    async def auxillary_list_all(self, func, sub_id, ops, args: Optional[str] = None, caller="", api_version=None) -> None:
+    async def auxiliary_list_all(self, func, sub_id, ops, args: Optional[str] = None, caller="", api_version=None) -> None:
         try:
             name = str(func.__class__)
             name = name.strip("\'<>").split(".")[-1]
@@ -1118,7 +1068,7 @@ class AzureDataDumper(DataDumper):
                             f.write("\n")
                             f.flush()
                             os.fsync(f)
-                    await asyncio.sleep(0) # make it blocking so that other coroutines can continue
+                    await asyncio.sleep(0)  # yield to event loop
 
                 self.logger.info("Finished dumping Azure " + name)
         except HttpResponseError as e:
@@ -1136,75 +1086,75 @@ class AzureDataDumper(DataDumper):
             scope = "/subscriptions/" + sub_id
             caller_name = asyncio.current_task().get_name()
 
-            if self.us_gov.lower() == "false":
+            if self.gcc_high.lower() == "false":
                 await asyncio.gather(
-                    self.auxillary_list_all(security_client.settings, sub_id, "list", caller=caller_name),
-                    self.auxillary_list_all(security_client.security_solutions, sub_id, "list", caller=caller_name)
+                    self.auxiliary_list_all(security_client.settings, sub_id, "list", caller=caller_name),
+                    self.auxiliary_list_all(security_client.security_solutions, sub_id, "list", caller=caller_name)
                 )
 
             await asyncio.gather(
-                self.auxillary_list_all(security_client.alerts, sub_id, "list", caller=caller_name),
-                self.auxillary_list_all(security_client.allowed_connections, sub_id, "list", caller=caller_name),
-                self.auxillary_list_all(security_client.applications, sub_id, "list", caller=caller_name),
-                self.auxillary_list_all(security_client.assessments, sub_id, "list", scope, caller=caller_name),
-                self.auxillary_list_all(security_client.auto_provisioning_settings, sub_id, "list", caller=caller_name),
-                self.auxillary_list_all(security_client.automations, sub_id, "list", caller=caller_name),
-                self.auxillary_list_all(security_client.compliance_results, sub_id, "list", scope, caller=caller_name),
-                self.auxillary_list_all(security_client.compliances, sub_id, "list", scope, caller=caller_name),
-                self.auxillary_list_all(security_client.discovered_security_solutions, sub_id, "list", caller=caller_name),
-                self.auxillary_list_all(security_client.external_security_solutions, sub_id, "list", caller=caller_name),
-                self.auxillary_list_all(security_client.governance_rules, sub_id, "list", scope, caller=caller_name),
-                self.auxillary_list_all(security_client.information_protection_policies, sub_id, "list", scope, caller=caller_name),
-                self.auxillary_list_all(security_client.jit_network_access_policies, sub_id, "list", caller=caller_name),
-                self.auxillary_list_all(security_client.locations, sub_id, "list", caller=caller_name),
-                self.auxillary_list_all(security_client.secure_score_controls, sub_id, "list", caller=caller_name),
-                self.auxillary_list_all(security_client.secure_scores, sub_id, "list", caller=caller_name),
-                self.auxillary_list_all(security_client.security_contacts, sub_id, "list", api_version="2023-12-01-preview", caller=caller_name),
-                self.auxillary_list_all(security_client.sub_assessments, sub_id, "list_all", scope, caller=caller_name),
-                self.auxillary_list_all(security_client.tasks, sub_id, "list", caller=caller_name),
-                self.auxillary_list_all(security_client.topology, sub_id, "list", caller=caller_name),
-                self.auxillary_list_all(security_client.workspace_settings, sub_id, "list", caller=caller_name),
-                self.auxillary_list_all(network_manager.application_gateways, sub_id, "list_all", caller=caller_name),
-                self.auxillary_list_all(network_manager.application_security_groups, sub_id, "list_all", caller=caller_name),
-                self.auxillary_list_all(network_manager.azure_firewall_fqdn_tags, sub_id, "list_all", caller=caller_name),
-                self.auxillary_list_all(network_manager.azure_firewalls, sub_id, "list_all", caller=caller_name),
-                self.auxillary_list_all(network_manager.bastion_hosts, sub_id, "list", caller=caller_name),
-                self.auxillary_list_all(network_manager.custom_ip_prefixes, sub_id, "list_all", caller=caller_name),
-                self.auxillary_list_all(network_manager.ddos_protection_plans, sub_id, "list", caller=caller_name),
-                self.auxillary_list_all(network_manager.dscp_configuration, sub_id, "list_all", caller=caller_name),
-                self.auxillary_list_all(network_manager.express_route_circuits, sub_id, "list_all", caller=caller_name),
-                self.auxillary_list_all(network_manager.express_route_ports, sub_id, "list", caller=caller_name),
-                self.auxillary_list_all(network_manager.firewall_policies, sub_id, "list_all", caller=caller_name),
-                self.auxillary_list_all(network_manager.ip_allocations, sub_id, "list", caller=caller_name),
-                self.auxillary_list_all(network_manager.ip_groups, sub_id, "list", caller=caller_name),
-                self.auxillary_list_all(network_manager.load_balancers, sub_id, "list_all", caller=caller_name),
-                self.auxillary_list_all(network_manager.nat_gateways, sub_id, "list_all", caller=caller_name),
-                self.auxillary_list_all(network_manager.network_interfaces, sub_id, "list_all", caller=caller_name),
-                self.auxillary_list_all(network_manager.network_managers, sub_id, "list_by_subscription", caller=caller_name),
-                self.auxillary_list_all(network_manager.network_profiles, sub_id, "list_all", caller=caller_name),
-                self.auxillary_list_all(network_manager.network_security_groups, sub_id, "list_all", caller=caller_name),
-                self.auxillary_list_all(network_manager.network_security_perimeters, sub_id, "list_by_subscription", api_version="2023-07-01-preview", caller=caller_name),
-                self.auxillary_list_all(network_manager.network_virtual_appliances, sub_id, "list", caller=caller_name),
-                self.auxillary_list_all(network_manager.network_watchers, sub_id, "list_all", caller=caller_name),
-                self.auxillary_list_all(network_manager.p2_svpn_gateways, sub_id, "list", caller=caller_name),
-                self.auxillary_list_all(network_manager.private_endpoints, sub_id, "list_by_subscription", caller=caller_name),
-                self.auxillary_list_all(network_manager.private_link_services, sub_id, "list_by_subscription", caller=caller_name),
-                self.auxillary_list_all(network_manager.public_ip_addresses, sub_id, "list_all", caller=caller_name),
-                self.auxillary_list_all(network_manager.public_ip_prefixes, sub_id, "list_all", caller=caller_name),
-                self.auxillary_list_all(network_manager.route_filters, sub_id, "list", caller=caller_name),
-                self.auxillary_list_all(network_manager.route_tables, sub_id, "list_all", caller=caller_name),
-                self.auxillary_list_all(network_manager.security_partner_providers, sub_id, "list", caller=caller_name),
-                self.auxillary_list_all(network_manager.service_endpoint_policies, sub_id, "list", caller=caller_name),
-                self.auxillary_list_all(network_manager.subscription_network_manager_connections, sub_id, "list", caller=caller_name),
-                self.auxillary_list_all(network_manager.virtual_hubs, sub_id, "list", caller=caller_name),
-                self.auxillary_list_all(network_manager.virtual_network_taps, sub_id, "list_all", caller=caller_name),
-                self.auxillary_list_all(network_manager.virtual_networks, sub_id, "list_all", caller=caller_name),
-                self.auxillary_list_all(network_manager.virtual_routers, sub_id, "list", caller=caller_name),
-                self.auxillary_list_all(network_manager.virtual_wans, sub_id, "list", caller=caller_name),
-                self.auxillary_list_all(network_manager.vpn_gateways, sub_id, "list", caller=caller_name),
-                self.auxillary_list_all(network_manager.vpn_server_configurations, sub_id, "list", caller=caller_name),
-                self.auxillary_list_all(network_manager.vpn_sites, sub_id, "list", caller=caller_name),
-                self.auxillary_list_all(network_manager.web_application_firewall_policies, sub_id, "list_all", caller=caller_name)
+                self.auxiliary_list_all(security_client.alerts, sub_id, "list", caller=caller_name),
+                self.auxiliary_list_all(security_client.allowed_connections, sub_id, "list", caller=caller_name),
+                self.auxiliary_list_all(security_client.applications, sub_id, "list", caller=caller_name),
+                self.auxiliary_list_all(security_client.assessments, sub_id, "list", scope, caller=caller_name),
+                self.auxiliary_list_all(security_client.auto_provisioning_settings, sub_id, "list", caller=caller_name),
+                self.auxiliary_list_all(security_client.automations, sub_id, "list", caller=caller_name),
+                self.auxiliary_list_all(security_client.compliance_results, sub_id, "list", scope, caller=caller_name),
+                self.auxiliary_list_all(security_client.compliances, sub_id, "list", scope, caller=caller_name),
+                self.auxiliary_list_all(security_client.discovered_security_solutions, sub_id, "list", caller=caller_name),
+                self.auxiliary_list_all(security_client.external_security_solutions, sub_id, "list", caller=caller_name),
+                self.auxiliary_list_all(security_client.governance_rules, sub_id, "list", scope, caller=caller_name),
+                self.auxiliary_list_all(security_client.information_protection_policies, sub_id, "list", scope, caller=caller_name),
+                self.auxiliary_list_all(security_client.jit_network_access_policies, sub_id, "list", caller=caller_name),
+                self.auxiliary_list_all(security_client.locations, sub_id, "list", caller=caller_name),
+                self.auxiliary_list_all(security_client.secure_score_controls, sub_id, "list", caller=caller_name),
+                self.auxiliary_list_all(security_client.secure_scores, sub_id, "list", caller=caller_name),
+                self.auxiliary_list_all(security_client.security_contacts, sub_id, "list", api_version="2023-12-01-preview", caller=caller_name),
+                self.auxiliary_list_all(security_client.sub_assessments, sub_id, "list_all", scope, caller=caller_name),
+                self.auxiliary_list_all(security_client.tasks, sub_id, "list", caller=caller_name),
+                self.auxiliary_list_all(security_client.topology, sub_id, "list", caller=caller_name),
+                self.auxiliary_list_all(security_client.workspace_settings, sub_id, "list", caller=caller_name),
+                self.auxiliary_list_all(network_manager.application_gateways, sub_id, "list_all", caller=caller_name),
+                self.auxiliary_list_all(network_manager.application_security_groups, sub_id, "list_all", caller=caller_name),
+                self.auxiliary_list_all(network_manager.azure_firewall_fqdn_tags, sub_id, "list_all", caller=caller_name),
+                self.auxiliary_list_all(network_manager.azure_firewalls, sub_id, "list_all", caller=caller_name),
+                self.auxiliary_list_all(network_manager.bastion_hosts, sub_id, "list", caller=caller_name),
+                self.auxiliary_list_all(network_manager.custom_ip_prefixes, sub_id, "list_all", caller=caller_name),
+                self.auxiliary_list_all(network_manager.ddos_protection_plans, sub_id, "list", caller=caller_name),
+                self.auxiliary_list_all(network_manager.dscp_configuration, sub_id, "list_all", caller=caller_name),
+                self.auxiliary_list_all(network_manager.express_route_circuits, sub_id, "list_all", caller=caller_name),
+                self.auxiliary_list_all(network_manager.express_route_ports, sub_id, "list", caller=caller_name),
+                self.auxiliary_list_all(network_manager.firewall_policies, sub_id, "list_all", caller=caller_name),
+                self.auxiliary_list_all(network_manager.ip_allocations, sub_id, "list", caller=caller_name),
+                self.auxiliary_list_all(network_manager.ip_groups, sub_id, "list", caller=caller_name),
+                self.auxiliary_list_all(network_manager.load_balancers, sub_id, "list_all", caller=caller_name),
+                self.auxiliary_list_all(network_manager.nat_gateways, sub_id, "list_all", caller=caller_name),
+                self.auxiliary_list_all(network_manager.network_interfaces, sub_id, "list_all", caller=caller_name),
+                self.auxiliary_list_all(network_manager.network_managers, sub_id, "list_by_subscription", caller=caller_name),
+                self.auxiliary_list_all(network_manager.network_profiles, sub_id, "list_all", caller=caller_name),
+                self.auxiliary_list_all(network_manager.network_security_groups, sub_id, "list_all", caller=caller_name),
+                self.auxiliary_list_all(network_manager.network_security_perimeters, sub_id, "list_by_subscription", api_version="2023-07-01-preview", caller=caller_name),
+                self.auxiliary_list_all(network_manager.network_virtual_appliances, sub_id, "list", caller=caller_name),
+                self.auxiliary_list_all(network_manager.network_watchers, sub_id, "list_all", caller=caller_name),
+                self.auxiliary_list_all(network_manager.p2_svpn_gateways, sub_id, "list", caller=caller_name),
+                self.auxiliary_list_all(network_manager.private_endpoints, sub_id, "list_by_subscription", caller=caller_name),
+                self.auxiliary_list_all(network_manager.private_link_services, sub_id, "list_by_subscription", caller=caller_name),
+                self.auxiliary_list_all(network_manager.public_ip_addresses, sub_id, "list_all", caller=caller_name),
+                self.auxiliary_list_all(network_manager.public_ip_prefixes, sub_id, "list_all", caller=caller_name),
+                self.auxiliary_list_all(network_manager.route_filters, sub_id, "list", caller=caller_name),
+                self.auxiliary_list_all(network_manager.route_tables, sub_id, "list_all", caller=caller_name),
+                self.auxiliary_list_all(network_manager.security_partner_providers, sub_id, "list", caller=caller_name),
+                self.auxiliary_list_all(network_manager.service_endpoint_policies, sub_id, "list", caller=caller_name),
+                self.auxiliary_list_all(network_manager.subscription_network_manager_connections, sub_id, "list", caller=caller_name),
+                self.auxiliary_list_all(network_manager.virtual_hubs, sub_id, "list", caller=caller_name),
+                self.auxiliary_list_all(network_manager.virtual_network_taps, sub_id, "list_all", caller=caller_name),
+                self.auxiliary_list_all(network_manager.virtual_networks, sub_id, "list_all", caller=caller_name),
+                self.auxiliary_list_all(network_manager.virtual_routers, sub_id, "list", caller=caller_name),
+                self.auxiliary_list_all(network_manager.virtual_wans, sub_id, "list", caller=caller_name),
+                self.auxiliary_list_all(network_manager.vpn_gateways, sub_id, "list", caller=caller_name),
+                self.auxiliary_list_all(network_manager.vpn_server_configurations, sub_id, "list", caller=caller_name),
+                self.auxiliary_list_all(network_manager.vpn_sites, sub_id, "list", caller=caller_name),
+                self.auxiliary_list_all(network_manager.web_application_firewall_policies, sub_id, "list_all", caller=caller_name)
             )
 
             async with asyncio.TaskGroup() as tg:

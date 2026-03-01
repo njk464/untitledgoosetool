@@ -30,27 +30,9 @@ class MDEDataDumper(DataDumper):
         self.mde_url = endpoints["securitycenter_api"] + "/"
         self.identity_url = endpoints["security_api"]
         self.call_object = [self.mde_url, self.app_auth, self.logger, self.output_dir, self.get_session()]
-        self.mde_THRESHOLD = int(config_get(config, 'variables', 'mde_threshold'))
+        self.threshold = int(config_get(config, 'variables', 'mde_threshold'))
         self.mde_query_mode = config_get(config, 'variables', 'mde_query_mode')
-        filters = config_get(config, 'filters', 'date_start', logger=self.logger)
-        self.logger.debug(f"Filters are {filters}")
-        if filters != '' and  filters is not None:
-            self.date_range=True
-            self.date_start = config['filters']['date_start']
-            if config['filters']['date_end'] != '':
-                self.date_end = config['filters']['date_end']
-            else:
-                self.date_end = datetime.now().strftime("%Y-%m-%d")
-        else:
-            self.date_range=False
-
-    def get_url(self):
-        if self.mde_gcc == "true":
-            return "https://api-gcc.securitycenter.microsoft.us"
-        elif self.mde_gcc_high == "true":
-            return "https://api-gov.securitycenter.microsoft.us"
-        else:
-            return "https://api.securitycenter.windows.com/"
+        self.date_range, self.date_start, self.date_end = get_date_range(config, self.logger)
 
     async def dump_machines(self) -> None:
         """
@@ -315,8 +297,8 @@ class MDEDataDumper(DataDumper):
         elif result:
             count = len(result)
         if count != None:
-            done_status = count < self.mde_THRESHOLD
-        bounds = self._insert_mde_record({"count": count,
+            done_status = count < self.threshold
+        bounds = insert_bounds_record({"count": count,
                   "start": start,
                   "end": end,
                   "done_status": done_status}, bounds)
@@ -326,58 +308,13 @@ class MDEDataDumper(DataDumper):
             self.logger.debug(err)
         if err is TimeoutError or \
            err and any(e in err for e in slice_errors) or \
-           (count and count >= self.mde_THRESHOLD):
+           (count and count >= self.threshold):
            new_end_ts = start.timestamp() + ((end.timestamp() - start.timestamp())/2)
            end = datetime.fromtimestamp(new_end_ts, utc)
         elif err and any(e in err for e in sleep_errors):
-            await asyncio.sleep(int(60))
+            await asyncio.sleep(RATE_LIMIT_SLEEP_SECONDS)
 
         return result, err, end, bounds
-
-
-    def _insert_mde_record(self, record, bounds):
-        """
-        Description:
-            Add a record to the sorted  bounds_state.
-
-        Arguments:
-            record: Tuple of (start, end, count, done_status)
-            bounds: Time Bounds Dictionary
-
-        Returns:
-            bounds. The updated time bounds dictionary
-        """
-        # Perform insert
-        #self.logger.debug(f"Inserting Record {record}")
-
-        if len(bounds) == 0:
-            bounds.append(record)
-            return bounds
-        done_idx = 0
-        for idx, cur_record in enumerate(bounds):
-            # Only situation for an insert here should be where a record already exists with that start
-            # time and we just shrink the bounds
-            if record["start"] == cur_record["start"] and record["end"] <= cur_record["end"]:
-                cur_record["start"] = record["end"]
-                # if the count is less than 0 then it is not accurate
-                if cur_record["count"] != None and cur_record["count"] >= 0 \
-                   and record["count"] != None and record["count"] > 0:
-                    cur_record["count"] = max(0,cur_record["count"] - record["count"])
-
-                new_records = [record.copy(), cur_record.copy()]
-                if (cur_record["count"] != None and cur_record["count"] == 0) or cur_record["start"] == cur_record["end"]:
-                    record["end"] = cur_record["end"]
-                    new_records = [record.copy()]
-                bounds = bounds[done_idx:idx] + new_records + bounds[idx+1:]
-                #self.logger.debug(f"Record inserted at index {idx}")
-                break
-        idx = 0
-        while idx < len(bounds):
-            if bounds[idx]["done_status"] == False:
-                break
-            idx += 1
-        return bounds[idx:]
-
 
 
     async def _dump_table(self, base_query, start, end, path, statefile, outfile, retries=3):
@@ -446,13 +383,13 @@ class MDEDataDumper(DataDumper):
 
             # Run a search to get a summary of the timeframe. Faster and provides more info
             if bounds[0]["count"] == None or \
-               (bounds[0]["count"] >= self.mde_THRESHOLD and end <= bounds[0]["end"]):
+               (bounds[0]["count"] >= self.threshold and end <= bounds[0]["end"]):
                 summary, err, end, bounds = await self.run_mde_query(base_query, start, end, bounds, path=path, summarize=True)
                 if err:
                     tries += 1
                     continue
                 tries = 0
-                if summary[0]["Count"] >= self.mde_THRESHOLD:
+                if summary[0]["Count"] >= self.threshold:
                     continue
                 if summary[0]["Count"] == 0:
                     end = bounds[0]["end"]
@@ -477,7 +414,7 @@ class MDEDataDumper(DataDumper):
                 tries = 0
                 end = bounds[0]["end"]
                 start = bounds[0]["start"]
-                if bounds[0]["count"] != None and bounds[0]["count"] >= self.mde_THRESHOLD:
+                if bounds[0]["count"] != None and bounds[0]["count"] >= self.threshold:
                     new_end_ts = start.timestamp() + ((end.timestamp() - start.timestamp())/2)
                     end = datetime.fromtimestamp(new_end_ts, utc)
 

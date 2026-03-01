@@ -5,8 +5,6 @@
 This module converts GUIDs to human readable text.
 """
 
-import argparse
-from ast import parse
 import warnings
 import csv
 
@@ -18,23 +16,6 @@ if sys.platform == 'win32':
 warnings.simplefilter('ignore')
 
 logger = None
-data_calls = {}
-
-def getargs(csv_parser) -> None:
-    csv_parser.add_argument('-o',
-                               '--output_dir',
-                               action='store',
-                               help='The directory where the goose files are located',
-                               default='output/entraid/')
-    csv_parser.add_argument('-r',
-                               '--result_dir',
-                               action='store',
-                               help='Directory for storing the results (default: output/csvs)',
-                               default='output/csvs/')
-    csv_parser.add_argument('--debug',
-                               action='store_true',
-                               help='Debug output',
-                               default=False)
 
 def create_file_filter_dict():
     file_filter_dict = {

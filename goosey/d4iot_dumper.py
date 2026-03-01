@@ -13,7 +13,7 @@ from goosey.utils import *
 
 class DefenderIoTDumper(DataDumper):
     def __init__(self, output_dir, reports_dir, session, csrftoken, sessionid, config, auth_un_pw, debug):
-        super().__init__(f'{output_dir}{os.path.sep}d4iot', reports_dir, csrftoken, sessionid, session, debug)
+        super().__init__(f'{output_dir}{os.path.sep}d4iot', reports_dir, csrftoken, session, debug)
         self.logger = setup_logger(__name__, debug)
         if auth_un_pw is not None:
             if auth_un_pw['auth']['d4iot_sensor_token']:

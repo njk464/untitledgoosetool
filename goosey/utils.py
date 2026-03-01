@@ -6,6 +6,7 @@
 
 import asyncio
 import configparser
+import functools
 import darkdetect
 import json
 import logging
@@ -18,7 +19,6 @@ import pytz
 
 from colored import stylize, attr, fg
 from datetime import datetime, timedelta, date
-from tracemalloc import start
 from logging import handlers
 import dateutil.parser
 
@@ -28,6 +28,18 @@ else:
     import fcntl
 
 utc = pytz.UTC
+
+# Constants
+RATE_LIMIT_SLEEP_SECONDS = 60
+KQL_RATE_LIMIT_SLEEP_SECONDS = 30
+DEFAULT_RETRIES = 50
+HELPER_RETRIES = 5
+DUMP_TABLE_RETRIES = 3
+LAW_QUERY_THRESHOLD = 10000
+EXO_ANCHOR_MAILBOX = 'SystemMailbox{bb558c35-97f1-4cb9-8ff7-d53741dc928c}'
+SESSION_ID_MIN = 1337
+SESSION_ID_MAX = 9999999
+USGOV_LOCATION = 'USGov Virginia'
 
 # Custom logging from https://stackoverflow.com/questions/384076/how-can-i-color-python-logging-output
 class CustomFormatter(logging.Formatter):
@@ -100,7 +112,7 @@ def set_quiet_mode(enabled):
                 if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
                     lgr.removeHandler(handler)
 
-def setup_logger(name, debug, formatter='cli') -> None:
+def setup_logger(name, debug, formatter='cli') -> logging.Logger:
     """Helper function to set up logger.
 
     :param name: Logger name to grab
@@ -296,7 +308,7 @@ def check_output_dir(output_dir, logger):
         sys.exit(1)
 
 async def get_nextlink(url, outfile, session, logger, auth):
-    retries = 50
+    retries = DEFAULT_RETRIES
     while url:
         try:
             if '$skiptoken' in url:
@@ -323,7 +335,7 @@ async def get_nextlink(url, outfile, session, logger, auth):
                     os.fsync(f)
                 if '@odata.nextLink' in result2:
                     url = result2['@odata.nextLink']
-                    retries = 50
+                    retries = DEFAULT_RETRIES
                 else:
                     url = None
         except asyncio.TimeoutError:
@@ -337,8 +349,8 @@ async def get_nextlink(url, outfile, session, logger, auth):
                 try:
                     if e.status:
                         if e.status == 429:
-                            logger.info('Sleeping for 60 seconds because of API throttle limit was exceeded.')
-                            await asyncio.sleep(60)
+                            logger.info('Sleeping for %d seconds because of API throttle limit was exceeded.' % RATE_LIMIT_SLEEP_SECONDS)
+                            await asyncio.sleep(RATE_LIMIT_SLEEP_SECONDS)
                         elif e.status == 401:
                             logger.error('Unauthorized message received. Exiting calls.')
                             logger.error("Check auth to make sure it's not expired.")
@@ -349,7 +361,7 @@ async def get_nextlink(url, outfile, session, logger, auth):
                 except AttributeError as a:
                     logger.error('Error on nextLink retrieval {}: {}'.format(skiptoken, str(e)))
 
-async def run_kql_query(query, start, end, bounds, url, app_auth, logger, session, threshold=10000, summarize=False):
+async def run_kql_query(query, start, end, bounds, url, app_auth, logger, session, threshold=LAW_QUERY_THRESHOLD, summarize=False):
     """
     Run an advanced query or hunt and return the result
     """
@@ -394,7 +406,7 @@ async def run_kql_query(query, start, end, bounds, url, app_auth, logger, sessio
                 error = result['error']
                 message = error['message']
                 logger.debug(message)
-                await asyncio.sleep(30)
+                await asyncio.sleep(KQL_RATE_LIMIT_SLEEP_SECONDS)
                 err = message
                 result = None
             else:
@@ -434,7 +446,7 @@ async def run_kql_query(query, start, end, bounds, url, app_auth, logger, sessio
        new_end_ts = start.timestamp() + ((end.timestamp() - start.timestamp())/2)
        end = datetime.fromtimestamp(new_end_ts, utc)
     elif err and any(e in err for e in sleep_errors):
-        await asyncio.sleep(int(60))
+        await asyncio.sleep(RATE_LIMIT_SLEEP_SECONDS)
     elif err and any(e in err for e in auth_errors):
         sys.exit(1)
 
@@ -504,31 +516,31 @@ def insert_bounds_record(record, bounds):
         idx += 1
     return bounds[idx:]
 
-async def helper_single_object(object, params, failurefile=None, retries=5, caller="") -> None:
+async def helper_single_object(endpoint, params, failurefile=None, retries=5, caller="") -> None:
         url, auth, logger, output_dir, session = params[0], params[1], params[2], params[3], params[4]
 
         current_task = asyncio.current_task()
         if "Task" in current_task.get_name():
-            task_name = object.replace("/","_").split("(")[0].split(".")[0]
+            task_name = endpoint.replace("/","_").split("(")[0].split(".")[0]
             if caller:
                 task_name = f"{caller}_{task_name}"
             current_task.set_name(task_name)
 
         if 'token_type' not in auth or 'access_token' not in auth:
-            logger.error(f"Missing token_type and access_token from auth. Did you auth correctly? (Skipping {object})")
+            logger.error(f"Missing token_type and access_token from auth. Did you auth correctly? (Skipping {endpoint})")
             return
-        url += object
-        if '?' in object:
-            object = object.split('?')[0]
-        if '/' in object:
-            temp = object.split('/')
-            object = '_'.join(temp)
-        name = object
+        url += endpoint
+        if '?' in endpoint:
+            endpoint = endpoint.split('?')[0]
+        if '/' in endpoint:
+            temp = endpoint.split('/')
+            endpoint = '_'.join(temp)
+        name = endpoint
         logger.debug(name)
 
         try:
             header = {'Authorization': '%s %s' % (auth['token_type'], auth['access_token'])}
-            logger.info('Dumping %s information...' % (object))
+            logger.info('Dumping %s information...' % (name))
             outfile = os.path.join(output_dir, name + '.json')
 
             async with session.get(url, headers=header, raise_for_status=True) as r:
@@ -571,8 +583,8 @@ async def helper_single_object(object, params, failurefile=None, retries=5, call
             try:
                 if e.status:
                     if e.status == 429:
-                        logger.info('Sleeping for 60 seconds because of API throttle limit was exceeded.')
-                        await asyncio.sleep(60)
+                        logger.info('Sleeping for %d seconds because of API throttle limit was exceeded.' % RATE_LIMIT_SLEEP_SECONDS)
+                        await asyncio.sleep(RATE_LIMIT_SLEEP_SECONDS)
                         retries -= 1
                     elif e.status == 401:
                         logger.error('Unauthorized message received. Exiting calls.')
@@ -580,14 +592,14 @@ async def helper_single_object(object, params, failurefile=None, retries=5, call
                         sys.exit(1)
                         return
                     elif e.status == 400:
-                        logger.error('Error received on ' + str(object) + ': '  + str(e))
+                        logger.error('Error received on ' + str(name) + ': '  + str(e))
                         with open(failurefile, 'a+', encoding='utf-8') as f:
                             f.write('Error: ' + name + ' - ' + str((datetime.now())) + '\n')
                         return
             except AttributeError as a:
                 logger.error('Error on nextLink retrieval: {}'.format(str(e)))
 
-        logger.info('Finished dumping %s information.' % (object))
+        logger.info('Finished dumping %s information.' % (name))
 
 class Lock:
     def __init__(self, fh):
@@ -618,6 +630,28 @@ class Lock:
     def __del__(self):
         if self.fh != None:
             self.fh.close()
+
+def requires_auth(func):
+    """Decorator that checks app_auth has required token fields before running a dump method."""
+    @functools.wraps(func)
+    async def wrapper(self, *args, **kwargs):
+        if 'token_type' not in self.app_auth or 'access_token' not in self.app_auth:
+            self.logger.error(f"Missing token_type and access_token from auth. Did you auth correctly? (Skipping {func.__name__})")
+            return
+        from goosey.auth import check_app_auth_token
+        if check_app_auth_token(self.app_auth, self.logger):
+            return
+        return await func(self, *args, **kwargs)
+    return wrapper
+
+def get_section_dict(config, section, logger=None):
+    """Parse a config section into a dict of booleans."""
+    try:
+        return dict([(x[0], x[1].lower()=='true') for x in config.items(section)])
+    except Exception as e:
+        if logger:
+            logger.warning(f'Error getting section dictionary from config: {str(e)}')
+    return {}
 
 def get_end_time_yesterday():
     yesterday = date.today() - timedelta(days=1)

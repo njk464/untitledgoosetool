@@ -10,7 +10,6 @@ import json
 import os
 
 from datetime import datetime, timedelta
-from goosey.auth import check_app_auth_token
 from goosey.datadumper import DataDumper
 from goosey.utils import *
 
@@ -19,22 +18,12 @@ class EntraIdDataDumper(DataDumper):
     def __init__(self, output_dir, reports_dir, app_auth, session, config, debug):
         super().__init__(f'{output_dir}{os.path.sep}entraid', reports_dir, app_auth, session, debug)
         self.logger = setup_logger(__name__, debug)
-        self.THRESHOLD = 300
         self.gcc = config_get(config, 'config', 'gcc', self.logger).lower() == "true"
         self.gcc_high = config_get(config, 'config', 'gcc_high', self.logger).lower() == "true"
         endpoints = get_endpoints(gcc=self.gcc, gcc_high=self.gcc_high)
         self.graph_url = endpoints["graph_api"]
         self.failurefile = os.path.join(reports_dir, '_no_results.json')
-        filters = config_get(config, 'filters', 'date_start', logger=self.logger)
-        if  filters!= '' and filters is not None:
-            self.date_range=True
-            self.date_start = config_get(config, 'filters', 'date_start')
-            if config_get(config, 'filters', 'date_end') != '':
-                self.date_end = config_get(config, 'filters', 'date_end')
-            else:
-                self.date_end = datetime.now().strftime("%Y-%m-%d")
-        else:
-            self.date_range=False
+        self.date_range, self.date_start, self.date_end = get_date_range(config, self.logger)
 
         self.call_object = [self.get_url(), self.app_auth, self.logger, self.output_dir, self.get_session()]
 
@@ -62,6 +51,7 @@ class EntraIdDataDumper(DataDumper):
         """
         return await self._dump_signins('msi')
 
+    @requires_auth
     async def _dump_signins(self, source: str) -> None:
         """Dumps signin based off of signin source type.
         API Reference: https://docs.microsoft.com/en-us/graph/api/resources/signin?view=graph-rest-beta
@@ -71,13 +61,6 @@ class EntraIdDataDumper(DataDumper):
         :return: None
         :rtype: None
         """
-        if 'token_type' not in self.app_auth or 'access_token' not in self.app_auth:
-            self.logger.error("Missing token_type and access_token from auth. Did you auth correctly? (Skipping _dump_signins)")
-            return
-
-        if check_app_auth_token(self.app_auth, self.logger):
-            return
-
         signin_directory = os.path.join(self.output_dir, "signin_" + source)
         if not os.path.exists(signin_directory):
             os.mkdir(signin_directory)
@@ -157,7 +140,7 @@ class EntraIdDataDumper(DataDumper):
                         if e.status:
                             if e.status == 429:
                                 self.logger.info('Sleeping for 60 seconds because of API throttle limit was exceeded.')
-                                await asyncio.sleep(60)
+                                await asyncio.sleep(RATE_LIMIT_SLEEP_SECONDS)
                                 retries -= 1
                                 self.logger.debug('Retries remaining: {}'.format(str(retries)))
                             elif e.status == 401:
@@ -172,6 +155,7 @@ class EntraIdDataDumper(DataDumper):
 
         self.logger.info('Finished dumping signin logs for source: {}'.format(source))
 
+    @requires_auth
     async def dump_entraid_audit(self) -> None:
         """Dumps Entra ID Audit logs
         API Reference: https://docs.microsoft.com/en-us/graph/api/resources/directoryaudit?view=graph-rest-beta
@@ -179,14 +163,6 @@ class EntraIdDataDumper(DataDumper):
         :return: None
         :rtype: None
         """
-
-        if 'token_type' not in self.app_auth or 'access_token' not in self.app_auth:
-            self.logger.error("Missing token_type and access_token from auth. Did you auth correctly? (Skipping dump_entraid_audit)")
-            return
-
-        if check_app_auth_token(self.app_auth, self.logger):
-            return
-
         sub_dir = os.path.join(self.output_dir, 'entraid_audit_logs')
         check_output_dir(sub_dir, self.logger)
 
@@ -269,7 +245,7 @@ class EntraIdDataDumper(DataDumper):
                             else:
                                 self.logger.debug('Error in result: {}'.format(result['error']))
                                 self.logger.info('Sleeping for 60 seconds because of API throttle limit was exceeded.')
-                                await asyncio.sleep(60)
+                                await asyncio.sleep(RATE_LIMIT_SLEEP_SECONDS)
                                 retries -=1
 
                         with open(statefile, 'w') as f:
@@ -285,7 +261,7 @@ class EntraIdDataDumper(DataDumper):
                         if e.status:
                             if e.status == 429:
                                 self.logger.info('Sleeping for 60 seconds because of API throttle limit was exceeded.')
-                                await asyncio.sleep(60)
+                                await asyncio.sleep(RATE_LIMIT_SLEEP_SECONDS)
                                 retries -= 1
                             elif e.status == 401:
                                 self.logger.info('401 unauthorized message received. Exiting calls. Please re-auth.')
@@ -296,6 +272,7 @@ class EntraIdDataDumper(DataDumper):
 
         self.logger.info('Finished dumping Entra ID audit logs.')
 
+    @requires_auth
     async def dump_entraid_provisioning(self) -> None:
         """Dumps Entra ID provisioning logs
         API Reference: https://docs.microsoft.com/en-us/graph/api/resources/provisioningobjectsummary?view=graph-rest-beta
@@ -303,14 +280,6 @@ class EntraIdDataDumper(DataDumper):
         :return: None
         :rtype: None
         """
-
-        if 'token_type' not in self.app_auth or 'access_token' not in self.app_auth:
-            self.logger.error("Missing token_type and access_token from auth. Did you auth correctly? (Skipping dump_entraid_provisioning)")
-            return
-
-        if check_app_auth_token(self.app_auth, self.logger):
-            return
-
         url = self.graph_url + "/beta/auditLogs/provisioning"
 
         self.logger.info('Getting Entra ID provisioning logs...')

@@ -6,7 +6,6 @@ This module performs data collection of Microsoft's Defender for IOT.
 """
 
 import aiohttp
-import argparse
 import asyncio
 import configparser
 import json
@@ -14,7 +13,6 @@ import os
 import sys
 import time
 import warnings
-import getpass
 
 from goosey.datadumper import DataDumper
 from goosey.d4iot_dumper import DefenderIoTDumper
@@ -27,54 +25,9 @@ warnings.simplefilter('ignore')
 
 logger = None
 data_calls = {}
-encryption_pw = None
-
-def getargs(d4iot_parser) -> None:
-    """Helper function to build arguments for argparse
-
-    :param d4iot_parser: parser which will perform command line argument parsing
-    :type d4iot_parser: argparse.ArgumentParser
-    :return: None
-    :rtype: None
-    """
-    d4iot_parser.add_argument('-a',
-                               '--authfile',
-                               action='store',
-                               help='File to read credentials from obtained by goosey auth',
-                               default='.d4iot_auth')
-    d4iot_parser.add_argument('-c',
-                               '--config',
-                               action='store',
-                               help='Path to config file',
-                               default='.d4iot_conf')
-    d4iot_parser.add_argument('-ac',
-                               '--auth',
-                               action='store',
-                               help='Path to config file',
-                               default='.auth_d4iot')
-    d4iot_parser.add_argument('--output-dir',
-                               action='store',
-                               help='Output directory for output files',
-                               default='output')
-    d4iot_parser.add_argument('--reports-dir',
-                               action='store',
-                               help='Output directory for output files',
-                               default='reports')
-    d4iot_parser.add_argument('--debug',
-                               action='store_true',
-                               help='Debug output',
-                               default=False)
-    d4iot_parser.add_argument('--dry-run',
-                               action='store_true',
-                               help='Dry run (do not do any API calls)',
-                               default=False)
 
 def _get_section_dict(config, s):
-    try:
-        return dict([(x[0], x[1].lower()=='true') for x in config.items(s)])
-    except Exception as e:
-        logger.warning(f'Error getting section dictionary from config: {str(e)}')
-    return {}
+    return get_section_dict(config, s, logger)
 
 def parse_config(configfile, args, auth=False):
     global data_calls
@@ -129,18 +82,11 @@ async def run(args, config, auth, auth_un_pw=None):
 
     async with maindumper.ahsession as ahsession:
         tasks = []
-        tasks.extend(d4iot_dumper.data_dump(data_calls['d4iot']))
+        tasks.extend(d4iot_dumper.data_dump(data_calls['d4iot'], "d4iot"))
         await asyncio.gather(*tasks)
 
-def main(args=None) -> None:
-    global logger, encryption_pw
-
-    parser = argparse.ArgumentParser(add_help=True, description='Goosey', formatter_class=argparse.RawDescriptionHelpFormatter)
-
-    getargs(parser)
-
-    if args is None:
-        args = parser.parse_args()
+def main(args) -> None:
+    global logger
 
     logger = setup_logger(__name__, args.debug)
 
@@ -180,4 +126,4 @@ def d4iot(authfile=".d4iot_auth",
     main(args)
 
 if __name__ == "__main__":
-    main()
+    d4iot()
