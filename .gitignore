@@ -13,6 +13,7 @@ debug.log
 error.log
 .d4iot_conf
 .msgtrace_info
+.venv
 *.aes
 *.auth*
 *_auth*
