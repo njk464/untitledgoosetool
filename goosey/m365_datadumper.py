@@ -18,7 +18,6 @@ from tqdm import tqdm
 
 from aiohttp.client_exceptions import *
 from datetime import datetime, timedelta
-from goosey.auth import check_app_auth_token
 from goosey.datadumper import DataDumper
 from goosey.progress import get_progress_manager
 from goosey.utils import *
@@ -26,8 +25,8 @@ from io import StringIO
 
 class M365DataDumper(DataDumper):
 
-    def __init__(self, output_dir, reports_dir, app_auth, session, config, debug, o365_app_auth):
-        super().__init__(f'{output_dir}{os.path.sep}m365', reports_dir, app_auth, session, debug)
+    def __init__(self, output_dir, reports_dir, app_auth, session, config, debug, o365_app_auth, token_manager=None):
+        super().__init__(f'{output_dir}{os.path.sep}m365', reports_dir, app_auth, session, debug, token_manager=token_manager, endpoint_key="graph_api")
         self.logger = setup_logger(__name__, debug)
         self.gcc = config_get(config, 'config', 'gcc', self.logger).lower() == "true"
         self.gcc_high = config_get(config, 'config', 'gcc_high', self.logger).lower() == "true"
@@ -52,6 +51,7 @@ class M365DataDumper(DataDumper):
         """
         Run an exo powershell cmdlet and return the results
         """
+        self.ensure_token("outlook_office_api")
         access_token = self.o365_app_auth["access_token"]
         headers = {
                'Prefer': 'odata.maxpagesize=1000',
@@ -83,8 +83,8 @@ class M365DataDumper(DataDumper):
                 result = json.loads(result)
                 result["status"] = r.status
                 if r.status == 401:
-                    self.logger.error("Detected 401 unauthorized, exiting.")
-                    sys.exit(1)
+                    self.logger.error("Detected 401 unauthorized for EXO cmdlet %s." % cmdlet)
+                    err = "Unauthorized (401)"
                 elif r.status == 429:
                     error = result['error']
                     message = error['message']
@@ -357,8 +357,8 @@ class M365DataDumper(DataDumper):
                         retries = 0
                     elif e.status == 401:
                         self.logger.error('Error on json retrieval: {}'.format(str(e)))
-                        self.logger.info('Unauthorized message received. Exiting calls.')
-                        sys.exit("Check auth to make sure it's not expired.")
+                        self.logger.error('Unauthorized message received. Skipping inbox rules.')
+                        return
         self.logger.info('Finished dumping inbox rules.')
 
     def _insert_ual_record(self, record, boundsfile=None):
@@ -450,8 +450,8 @@ class M365DataDumper(DataDumper):
             bound1 = self.ual_bounds_state[idx]
             bound2 = self.ual_bounds_state[idx+1]
             if bound1["end"] > bound2["start"]:
-                self.logger.error(f"Overlap detected in bounds state. Terminating, {bound1}, {bound2}")
-                sys.exit(1)
+                self.logger.error(f"Overlap detected in bounds state: {bound1}, {bound2}")
+                raise RuntimeError(f"Overlap detected in UAL bounds state")
 
         if boundsfile != None:
             save_state(boundsfile, self.ual_bounds_state, is_datetime=False, time_bounds=True)

@@ -15,8 +15,8 @@ from goosey.utils import *
 
 class EntraIdDataDumper(DataDumper):
 
-    def __init__(self, output_dir, reports_dir, app_auth, session, config, debug):
-        super().__init__(f'{output_dir}{os.path.sep}entraid', reports_dir, app_auth, session, debug)
+    def __init__(self, output_dir, reports_dir, app_auth, session, config, debug, token_manager=None):
+        super().__init__(f'{output_dir}{os.path.sep}entraid', reports_dir, app_auth, session, debug, token_manager=token_manager, endpoint_key="graph_api")
         self.logger = setup_logger(__name__, debug)
         self.gcc = config_get(config, 'config', 'gcc', self.logger).lower() == "true"
         self.gcc_high = config_get(config, 'config', 'gcc_high', self.logger).lower() == "true"
@@ -97,6 +97,7 @@ class EntraIdDataDumper(DataDumper):
             end_date = '%sT00:00:00.000000Z' % (datetime.now().strftime("%Y-%m-%d"))
 
         while dateutil.parser.parse(start) < dateutil.parser.parse(end_date):
+            self.ensure_token()
             end_time = '%sT23:59:59.999999Z' % (datetime.strptime(start, ("%Y-%m-%dT%H:%M:%S.%fZ")).date())
             outfile = os.path.join(signin_directory, source + '_signin_log_' + str(datetime.strptime(end_time, ("%Y-%m-%dT%H:%M:%S.%fZ")).date()) + '.json')
             filters = '(createdDateTime ge %s and createdDateTime lt %s)' % (start, end_time)
@@ -127,7 +128,7 @@ class EntraIdDataDumper(DataDumper):
                             if result['error']['code'] == 'InvalidAuthenticationToken':
                                 self.logger.error("Error with authentication token: " + result['error']['message'])
                                 self.logger.error("Please re-auth.")
-                                sys.exit(1)
+                                return
 
                         await get_nextlink(nexturl, outfile, self.ahsession, self.logger, self.app_auth)
                         with open(statefile, 'w') as f:
@@ -144,8 +145,8 @@ class EntraIdDataDumper(DataDumper):
                                 retries -= 1
                                 self.logger.debug('Retries remaining: {}'.format(str(retries)))
                             elif e.status == 401:
-                                self.logger.error('401 unauthorized message received. Exiting calls. Please re-auth.')
-                                sys.exit(1)
+                                self.logger.error('401 unauthorized message received. Skipping signin source %s.' % source)
+                                return
                     except AttributeError as a:
                         self.logger.error('Error on nextLink retrieval: {}'.format(str(e)))
 
@@ -207,6 +208,7 @@ class EntraIdDataDumper(DataDumper):
 
         self.logger.info('Getting Entra ID audit logs...')
         while start < end_date:
+            self.ensure_token()
             retries = 5
             end_time = '%sT23:59:59.999999Z' % (datetime.strptime(start, ("%Y-%m-%dT%H:%M:%S.%fZ")).date())
             outfile = os.path.join(sub_dir, 'entraidauditlog_' + str(datetime.strptime(end_time, ("%Y-%m-%dT%H:%M:%S.%fZ")).date()) + '.json')
@@ -241,7 +243,7 @@ class EntraIdDataDumper(DataDumper):
                             if result['error']['code'] == 'InvalidAuthenticationToken':
                                 self.logger.error("Error with authentication token: " + result['error']['message'])
                                 self.logger.error("Please re-auth.")
-                                sys.exit(1)
+                                return
                             else:
                                 self.logger.debug('Error in result: {}'.format(result['error']))
                                 self.logger.info('Sleeping for 60 seconds because of API throttle limit was exceeded.')
@@ -264,8 +266,8 @@ class EntraIdDataDumper(DataDumper):
                                 await asyncio.sleep(RATE_LIMIT_SLEEP_SECONDS)
                                 retries -= 1
                             elif e.status == 401:
-                                self.logger.info('401 unauthorized message received. Exiting calls. Please re-auth.')
-                                sys.exit(1)
+                                self.logger.error('401 unauthorized message received. Skipping audit logs.')
+                                return
                     except AttributeError as a:
                         self.logger.error('Error on nextLink retrieval: {}'.format(str(e)))
 
@@ -290,7 +292,7 @@ class EntraIdDataDumper(DataDumper):
             result = await r.json()
             if 'value' not in result:
                 self.logger.debug("Error with result: {}".format(str(result)))
-                sys.exit(1)
+                return
 
             nexturl = None
             if '@odata.nextLink' in result:

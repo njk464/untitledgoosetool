@@ -32,8 +32,8 @@ utc = pytz.UTC
 
 class AzureDataDumper(DataDumper):
 
-    def __init__(self, output_dir, reports_dir, session, app_auth, config, auth_un_pw, loganalytics_app_auth, debug):
-        super().__init__(f'{output_dir}{os.path.sep}azure', reports_dir, app_auth, session, debug)
+    def __init__(self, output_dir, reports_dir, session, app_auth, config, auth_un_pw, loganalytics_app_auth, debug, token_manager=None):
+        super().__init__(f'{output_dir}{os.path.sep}azure', reports_dir, app_auth, session, debug, token_manager=token_manager, endpoint_key="resource_manager")
         self.logger = setup_logger(__name__, debug)
         self.failurefile = os.path.join(reports_dir, '_no_results.json')
         self.loganalytics_app_auth = loganalytics_app_auth
@@ -160,7 +160,7 @@ class AzureDataDumper(DataDumper):
                     if result['error']['code'] == 'ExpiredAuthenticationToken':
                         self.logger.error("Error with authentication token: " + result['error']['message'])
                         self.logger.error("Please re-auth.")
-                        sys.exit(1)
+                        return
 
             for location in locations:
                 device_grps = []
@@ -178,7 +178,7 @@ class AzureDataDumper(DataDumper):
                         if result['error']['code'] == 'ExpiredAuthenticationToken':
                             self.logger.error("Error with authentication token: " + result['error']['message'])
                             self.logger.error("Please re-auth.")
-                            sys.exit(1)
+                            return
 
                 alert_ids = []
                 for val in device_grps:
@@ -201,7 +201,7 @@ class AzureDataDumper(DataDumper):
                             if result['error']['code'] == 'ExpiredAuthenticationToken':
                                 self.logger.error("Error with authentication token: " + result['error']['message'])
                                 self.logger.error("Please re-auth.")
-                                sys.exit(1)
+                                return
 
                 for id in alert_ids:
                     availability_url = self._get_mgmt_url(id + "/pcapAvailability?api-version=2021-07-01-preview")
@@ -216,7 +216,7 @@ class AzureDataDumper(DataDumper):
                             elif result['error']['code'] == 'ExpiredAuthenticationToken':
                                 self.logger.error("Error with authentication token: " + result['error']['message'])
                                 self.logger.error("Please re-auth.")
-                                sys.exit(1)
+                                return
 
                         if 'status' in result:
                             if result['status'] == 'Done':
@@ -295,7 +295,7 @@ class AzureDataDumper(DataDumper):
                         if result['error']['code'] == 'ExpiredAuthenticationToken':
                             self.logger.error("Error with authentication token: " + result['error']['message'])
                             self.logger.error("Please re-auth.")
-                            sys.exit(1)
+                            return
 
                 for location in locations:
                     device_grps = []
@@ -315,7 +315,7 @@ class AzureDataDumper(DataDumper):
                             if result['error']['code'] == 'ExpiredAuthenticationToken':
                                 self.logger.error("Error with authentication token: " + result['error']['message'])
                                 self.logger.error("Please re-auth.")
-                                sys.exit(1)
+                                return
 
                     for val in device_grps:
                         url = self._get_mgmt_url("/subscriptions/" + subscriptionId + "/providers/Microsoft.IoTSecurity/locations/" + location + "/deviceGroups/" + val + "/alerts?api-version=2021-07-01-preview")
@@ -335,7 +335,7 @@ class AzureDataDumper(DataDumper):
                                 if result['error']['code'] == 'ExpiredAuthenticationToken':
                                     self.logger.error("Error with authentication token: " + result['error']['message'])
                                     self.logger.error("Please re-auth.")
-                                    sys.exit(1)
+                                    return
                             await get_nextlink(nexturl, outfile, self.ahsession, self.logger, self.app_auth)
                 self.logger.info("Finished getting D4IOT portal alerts from " + subscriptionId + ".")
 
@@ -369,7 +369,7 @@ class AzureDataDumper(DataDumper):
                         if result['error']['code'] == 'ExpiredAuthenticationToken':
                             self.logger.error("Error with authentication token: " + result['error']['message'])
                             self.logger.error("Please re-auth.")
-                            sys.exit(1)
+                            return
 
                 self.logger.info("Finished getting D4IOT portal defender settings from " + subscriptionId + ".")
 
@@ -400,7 +400,7 @@ class AzureDataDumper(DataDumper):
                     if result['error']['code'] == 'ExpiredAuthenticationToken':
                         self.logger.error("Error with authentication token: " + result['error']['message'])
                         self.logger.error("Please re-auth.")
-                        sys.exit(1)
+                        return
 
             for location in locations:
                 sites = []
@@ -420,7 +420,7 @@ class AzureDataDumper(DataDumper):
                         if result['error']['code'] == 'ExpiredAuthenticationToken':
                             self.logger.error("Error with authentication token: " + result['error']['message'])
                             self.logger.error("Please re-auth.")
-                            sys.exit(1)
+                            return
 
                 for val in sites:
                     url = self._get_mgmt_url("/subscriptions/" + subscriptionId + "/providers/Microsoft.IoTSecurity/locations/" + location + "/sites/" + val + "/sensors?api-version=2021-09-01-preview")
@@ -439,7 +439,7 @@ class AzureDataDumper(DataDumper):
                             if result['error']['code'] == 'ExpiredAuthenticationToken':
                                 self.logger.error("Error with authentication token: " + result['error']['message'])
                                 self.logger.error("Please re-auth.")
-                                sys.exit(1)
+                                return
                         await get_nextlink(nexturl, outfile, self.ahsession, self.logger, self.app_auth)
             self.logger.info("Finished getting D4IOT portal sensors settings from " + subscriptionId + ".")
 
@@ -784,6 +784,7 @@ class AzureDataDumper(DataDumper):
         """
         Dump list of log analytic workspaces and their table contents
         """
+        self.ensure_token("log_analytics_api")
         # default end time. Now
         end = utc.localize(datetime.now())
 
@@ -899,6 +900,7 @@ class AzureDataDumper(DataDumper):
 
 
         while start < finalEnd and tries < retries:
+            self.ensure_token("log_analytics_api")
             startDate = start.strftime("%Y-%m-%dT%H:%M:%S")
             endDate = end.strftime("%Y-%m-%dT%H:%M:%S")
             session_set = set() # Unique results returned. Used to detect duplicates

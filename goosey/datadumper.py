@@ -5,15 +5,25 @@ from goosey.utils import *
 from goosey.progress import get_progress_manager
 
 class DataDumper(object):
-    def __init__(self, output_dir: str, reports_dir: str, app_auth: dict, session, debug):
+    def __init__(self, output_dir: str, reports_dir: str, app_auth: dict, session, debug, token_manager=None, endpoint_key=None):
         self.output_dir = output_dir
         self.reports_dir = reports_dir
         self.ahsession = session
         self.app_auth = app_auth
         self.logger = setup_logger(type(self).__module__, debug)
+        self.token_manager = token_manager
+        self.endpoint_key = endpoint_key
 
     def get_session(self):
         return self.ahsession
+
+    def ensure_token(self, endpoint_key=None):
+        """Ensure the token for the given endpoint (or the default) is still valid."""
+        if self.token_manager is None:
+            return
+        key = endpoint_key or self.endpoint_key
+        if key:
+            self.token_manager.ensure_valid_token(key)
 
     def data_dump(self, calls, dumper_name) -> list:
         """
@@ -42,6 +52,7 @@ class DataDumper(object):
         if pm and task_name and not manages_own_progress:
             pm.start_task(task_name)
         try:
+            self.ensure_token()
             error = await func()
         except Exception as e:
             self.logger.debug(f"{func.__name__} Failed with error {e}", exc_info=1)

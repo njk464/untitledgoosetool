@@ -400,8 +400,9 @@ async def run_kql_query(query, start, end, bounds, url, app_auth, logger, sessio
         async with session.request("POST", url=url, headers=header, data=data) as r:
             result = await r.json()
             if r.status == 401:
-                logger.error("Detected 401 unauthorized, exiting.")
-                sys.exit(1)
+                logger.error("Detected 401 unauthorized. Skipping query.")
+                err = "Unauthorized (401)"
+                result = None
             elif r.status == 429:
                 error = result['error']
                 message = error['message']
@@ -448,7 +449,7 @@ async def run_kql_query(query, start, end, bounds, url, app_auth, logger, sessio
     elif err and any(e in err for e in sleep_errors):
         await asyncio.sleep(RATE_LIMIT_SLEEP_SECONDS)
     elif err and any(e in err for e in auth_errors):
-        sys.exit(1)
+        logger.error("Authentication token expired during KQL query.")
 
     return results, err, end, bounds
 
@@ -587,9 +588,8 @@ async def helper_single_object(endpoint, params, failurefile=None, retries=5, ca
                         await asyncio.sleep(RATE_LIMIT_SLEEP_SECONDS)
                         retries -= 1
                     elif e.status == 401:
-                        logger.error('Unauthorized message received. Exiting calls.')
+                        logger.error('Unauthorized message received. Skipping %s.' % (name))
                         logger.error("Check auth to make sure it's not expired.")
-                        sys.exit(1)
                         return
                     elif e.status == 400:
                         logger.error('Error received on ' + str(name) + ': '  + str(e))
@@ -638,9 +638,7 @@ def requires_auth(func):
         if 'token_type' not in self.app_auth or 'access_token' not in self.app_auth:
             self.logger.error(f"Missing token_type and access_token from auth. Did you auth correctly? (Skipping {func.__name__})")
             return
-        from goosey.auth import check_app_auth_token
-        if check_app_auth_token(self.app_auth, self.logger):
-            return
+        self.ensure_token()
         return await func(self, *args, **kwargs)
     return wrapper
 

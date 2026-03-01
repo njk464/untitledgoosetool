@@ -260,12 +260,71 @@ class Authentication():
 
         self.parse_config(self.config)
 
-def check_app_auth_token(auth_data, logger):
-    expiry_time = auth_data['expires_on']
-    if time.time() > expiry_time:
-        logger.warning("Authentication expired. Please re-authenticate before proceeding.")
-        sys.exit(1)
-    return False
+class TokenManager:
+    """Manages token lifecycle for all datadumpers.
+
+    Refreshes tokens proactively (before expiry) by mutating auth dicts in-place,
+    so all holders of references to those dicts automatically see new tokens.
+    """
+    _REFRESH_MARGIN_SECONDS = 300  # Refresh 5 minutes before expiry
+
+    def __init__(self, auth_dict, endpoints_dict, logger):
+        self._auth_dict = auth_dict
+        self._endpoints_dict = endpoints_dict
+        self._logger = logger
+        self._msal_app = None
+
+        sdk = auth_dict.get('sdk_auth', {})
+        self._tenant_id = sdk.get('tenant_id')
+        self._app_id = sdk.get('app_id')
+        self._client_secret = sdk.get('client_secret')
+
+    def _get_msal_app(self):
+        if self._msal_app is None:
+            authority = f"{self._endpoints_dict['authority_api']}/{self._tenant_id}"
+            self._msal_app = msal.ConfidentialClientApplication(
+                client_id=self._app_id,
+                client_credential=self._client_secret,
+                authority=authority,
+            )
+        return self._msal_app
+
+    def ensure_valid_token(self, endpoint_key):
+        """Check if the token for endpoint_key is near expiry and refresh if needed.
+
+        Mutates auth_dict['app_auth'][endpoint_key] in place so all holders see the update.
+        """
+        if not endpoint_key:
+            return
+        app_auth = self._auth_dict.get('app_auth', {})
+        token_data = app_auth.get(endpoint_key)
+        if not token_data:
+            return
+
+        expires_on = token_data.get('expires_on', 0)
+        if time.time() < expires_on - self._REFRESH_MARGIN_SECONDS:
+            return  # Token still valid
+
+        self._logger.info(f"Token for {endpoint_key} refreshing...")
+        scope_url = self._endpoints_dict.get(endpoint_key)
+        if not scope_url:
+            self._logger.warning(f"No endpoint URL for {endpoint_key}, cannot refresh.")
+            return
+
+        scope = scope_url + "/.default"
+        try:
+            app = self._get_msal_app()
+            result = app.acquire_token_for_client(scopes=[scope])
+            if 'error' in result:
+                self._logger.error(f"Token refresh failed for {endpoint_key}: {result.get('error_description', result['error'])}")
+                return
+            if 'expires_in' in result:
+                result['expires_on'] = time.time() + result['expires_in']
+            # Mutate the dict in place so all references are updated
+            token_data.update(result)
+            self._logger.info(f"Token for {endpoint_key} refreshed successfully.")
+        except Exception as e:
+            self._logger.error(f"Exception refreshing token for {endpoint_key}: {e}")
 
 def auth(authfile=".ugt_auth",
          d4iot_authfile=".d4iot_auth",

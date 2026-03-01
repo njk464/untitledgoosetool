@@ -13,7 +13,6 @@ import os
 import sys
 import time
 import warnings
-from multiprocessing import Process
 
 from tqdm import tqdm
 
@@ -23,7 +22,7 @@ from goosey.datadumper import DataDumper
 from goosey.m365_datadumper import M365DataDumper
 from goosey.mde_datadumper import MDEDataDumper
 from goosey.utils import *
-from goosey.auth import auth as gooseyauth
+from goosey.auth import auth as gooseyauth, TokenManager
 from goosey.progress import init_progress_manager
 
 if sys.platform == 'win32':
@@ -61,7 +60,15 @@ async def run(args, config, auth, init_sections, auth_un_pw=None):
     loganalytics_app_auth = auth["app_auth"]["log_analytics_api"]
     msft_security_auth = auth["app_auth"]["security_api"]
 
-    maindumper = DataDumper(args.output_dir, args.reports_dir, msft_graph_app_auth, session, args.debug)
+    # Create TokenManager for automatic token refresh
+    gcc = config_get(config, 'config', 'gcc', logger)
+    gcc = gcc.lower() == "true" if gcc else False
+    gcc_high = config_get(config, 'config', 'gcc_high', logger)
+    gcc_high = gcc_high.lower() == "true" if gcc_high else False
+    endpoints_dict = get_endpoints(gcc=gcc, gcc_high=gcc_high)
+    token_manager = TokenManager(auth, endpoints_dict, logger)
+
+    maindumper = DataDumper(args.output_dir, args.reports_dir, msft_graph_app_auth, session, args.debug, token_manager=token_manager, endpoint_key="graph_api")
 
     m365, entraid, azure, mde = False, False, False, False
 
@@ -73,16 +80,16 @@ async def run(args, config, auth, init_sections, auth_un_pw=None):
 
     else:
         if 'm365' in init_sections:
-            m365dumper = M365DataDumper(args.output_dir, args.reports_dir, msft_graph_app_auth, maindumper.ahsession, config, args.debug, o365_app_auth)
+            m365dumper = M365DataDumper(args.output_dir, args.reports_dir, msft_graph_app_auth, maindumper.ahsession, config, args.debug, o365_app_auth, token_manager=token_manager)
             m365 = True
         if 'entraid' in init_sections:
-            entraiddumper = EntraIdDataDumper(args.output_dir, args.reports_dir, msft_graph_app_auth, maindumper.ahsession, config, args.debug)
+            entraiddumper = EntraIdDataDumper(args.output_dir, args.reports_dir, msft_graph_app_auth, maindumper.ahsession, config, args.debug, token_manager=token_manager)
             entraid = True
         if 'azure' in init_sections:
-            azure_dumper = AzureDataDumper(args.output_dir, args.reports_dir, maindumper.ahsession, mgmt_app_auth, config, auth_un_pw, loganalytics_app_auth, args.debug)
+            azure_dumper = AzureDataDumper(args.output_dir, args.reports_dir, maindumper.ahsession, mgmt_app_auth, config, auth_un_pw, loganalytics_app_auth, args.debug, token_manager=token_manager)
             azure = True
         if 'mde' in init_sections:
-            mdedumper = MDEDataDumper(args.output_dir, args.reports_dir, msft_security_center_auth, msft_security_auth, maindumper.ahsession, config, args.debug)
+            mdedumper = MDEDataDumper(args.output_dir, args.reports_dir, msft_security_center_auth, msft_security_auth, maindumper.ahsession, config, args.debug, token_manager=token_manager)
             mde = True
 
     pm = init_progress_manager(enabled=not args.debug)
@@ -240,7 +247,7 @@ def autohonk(authfile=".ugt_auth",
          insecure=False):
     """
     Untitled Goose Tool Information Gathering. With auto authentication!
-    This will never stop until you tell it to.
+    Authenticates once, then runs collection to completion with automatic token refresh.
 
     Args:
         authfile: File to store the authentication tokens and cookies
@@ -255,44 +262,32 @@ def autohonk(authfile=".ugt_auth",
         mde: Set all of the MDE calls to true
         insecure: Disable secure authentication handling (file encryption)
     """
-    # auth and honk in a loop
     encryption_pw = None
     if not insecure:
         encryption_pw = getpass.getpass("Please type the password for file encryption: ")
-    auth_dict = {
-        "authfile": authfile,
-        "config": config,
-        "auth": auth,
-        "debug": debug,
-        "encryption_pw": encryption_pw
-    }
-    honk_dict = {
-        "authfile": authfile,
-        "config": config,
-        "auth": auth,
-        "output_dir": output_dir,
-        "reports_dir": reports_dir,
-        "debug": debug,
-        "azure": azure,
-        "entraid": entraid,
-        "m365": m365,
-        "mde": mde,
-        "encryption_pw": encryption_pw
-    }
-    # Endless loop to keep authing and honking
-    while True:
-        auth_process = Process(target=gooseyauth, kwargs=auth_dict)
-        auth_process.start()
-        auth_process.join()
 
-        honk_process = Process(target=honk, kwargs=honk_dict)
-        seconds = time.perf_counter()
+    # Authenticate once
+    gooseyauth(
+        authfile=authfile,
+        config=config,
+        auth=auth,
+        debug=debug,
+        encryption_pw=encryption_pw,
+    )
 
-        honk_process.start()
-        honk_process.join()
-
-        elapsed = time.perf_counter() - seconds
-        if elapsed <= 5:
-            break
+    # Run collection once — TokenManager handles mid-run token refresh
+    honk(
+        authfile=authfile,
+        config=config,
+        auth=auth,
+        output_dir=output_dir,
+        reports_dir=reports_dir,
+        debug=debug,
+        azure=azure,
+        entraid=entraid,
+        m365=m365,
+        mde=mde,
+        encryption_pw=encryption_pw,
+    )
 
 

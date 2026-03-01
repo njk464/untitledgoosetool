@@ -7,7 +7,6 @@ This module has all the telemetry pulls for MDE.
 
 from datetime import datetime, timedelta
 import itertools
-from goosey.auth import check_app_auth_token
 from goosey.datadumper import DataDumper
 from goosey.utils import *
 import pytz
@@ -19,8 +18,8 @@ today_date = datetime.today().replace(hour=0, minute=0, second=0, microsecond=0)
 
 class MDEDataDumper(DataDumper):
 
-    def __init__(self, output_dir, reports_dir, app_auth, app_auth2, session, config, debug):
-        super().__init__(f'{output_dir}{os.path.sep}mde', reports_dir, app_auth, session, debug)
+    def __init__(self, output_dir, reports_dir, app_auth, app_auth2, session, config, debug, token_manager=None):
+        super().__init__(f'{output_dir}{os.path.sep}mde', reports_dir, app_auth, session, debug, token_manager=token_manager, endpoint_key="securitycenter_api")
         self.app_auth2 = app_auth2
         self.failurefile = os.path.join(reports_dir, '_no_results.json')
         self.logger = setup_logger(__name__, debug)
@@ -84,7 +83,7 @@ class MDEDataDumper(DataDumper):
 
 
     async def check_machines(self):
-        check_app_auth_token(self.app_auth, self.logger)
+        self.ensure_token()
         outfile = os.path.join(self.output_dir, 'api_machines.json')
         data = []
         if os.path.exists(outfile):
@@ -192,7 +191,7 @@ class MDEDataDumper(DataDumper):
         """Dumps the results from advanced hunting API queries.
         API Reference: https://learn.microsoft.com/en-us/microsoft-365/security/defender/api-advanced-hunting?view=o365-worldwide
         """
-        check_app_auth_token(self.app_auth2, self.logger)
+        self.ensure_token("security_api")
 
         # default end time. Now
         end = utc.localize(datetime.now())
@@ -239,7 +238,10 @@ class MDEDataDumper(DataDumper):
 
         app_auth = self.app_auth
         if path == "api/advancedhunting/run":
+            self.ensure_token("security_api")
             app_auth = self.app_auth2
+        else:
+            self.ensure_token()
         header = {
             'Authorization': '%s %s' % (app_auth['token_type'], app_auth['access_token']),
             'Content-Type': 'application/json'
@@ -267,8 +269,9 @@ class MDEDataDumper(DataDumper):
             async with self.ahsession.request("POST", url=url, headers=header, data=data) as r:
                 result = await r.json()
                 if r.status == 401:
-                    self.logger.error("Detected 401 unauthorized, exiting.")
-                    sys.exit(1)
+                    self.logger.error("Detected 401 unauthorized for MDE query.")
+                    err = "Unauthorized (401)"
+                    result = None
                 elif r.status == 429:
                     error = result['error']
                     message = error['message']
