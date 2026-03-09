@@ -2,7 +2,16 @@
 # -*- coding: utf-8 -*-
 
 """Untitled Goose Tool: m365_datadumper!
-This module has all the telemetry pulls for M365.
+This module has all the telemetry pulls for M365 (Exchange Online / O365).
+
+Key concepts:
+- EXO cmdlets: Exchange Online PowerShell cmdlets executed via the AdminAPI REST endpoint.
+  These are used for mailbox info, inbox rules, mobile devices, role groups, etc.
+- UAL (Unified Audit Log): The main audit log for M365, queried via Search-UnifiedAuditLog.
+  UAL collection uses a complex binary-search bounding algorithm to handle large log volumes
+  (see _new_ual_timeframe and _insert_ual_record).
+- Save state: Most methods support resuming from a checkpoint file so interrupted runs
+  can continue without re-pulling already-collected data.
 """
 
 import asyncio
@@ -24,6 +33,12 @@ from goosey.utils import *
 from io import StringIO
 
 class M365DataDumper(DataDumper):
+    """Collects M365/Exchange Online telemetry: UAL, mailboxes, inbox rules, mobile devices, etc.
+
+    Uses two authentication tokens:
+    - app_auth (graph_api): For Microsoft Graph API calls (inbox rules via Graph, users list)
+    - o365_app_auth (outlook_office_api): For Exchange Online AdminAPI PowerShell cmdlets
+    """
 
     def __init__(self, output_dir, reports_dir, app_auth, session, config, debug, o365_app_auth, token_manager=None):
         super().__init__(f'{output_dir}{os.path.sep}m365', reports_dir, app_auth, session, debug, token_manager=token_manager, endpoint_key="graph_api")
@@ -33,23 +48,47 @@ class M365DataDumper(DataDumper):
         self.endpoints = get_endpoints(gcc=self.gcc, gcc_high=self.gcc_high)
         self.inboxfailfile = os.path.join(reports_dir, '_user_inbox_503.json')
         self.failurefile = os.path.join(reports_dir, '_no_results.json')
+
+        # UAL bounding state: tracks which time ranges have been searched and their log counts.
+        # Used by the binary-search algorithm to avoid re-querying completed ranges.
         self.ual_bounds_state = []
         self.o365_app_auth = o365_app_auth
+        # ual_threshold: max logs per time slice before binary-splitting into smaller ranges
         self.threshold = int(config_get(config, 'variables', 'ual_threshold'))
+        # max_ual_tasks: concurrency limit for parallel UAL session queries
         self.max_ual_tasks = max(1,int(config_get(config, 'variables', 'max_ual_tasks')))
         self.ual_extra_start = config_get(config, 'variables', 'ual_extra_start')
         self.ual_extra_end = config_get(config, 'variables', 'ual_extra_end')
+
+        # UAL filter parameters (all optional, comma-separated for multi-value)
+        self.ual_record_type = config_get(config, 'variables', 'ual_record_type')
+        self.ual_operations = config_get(config, 'variables', 'ual_operations')
+        self.ual_user_ids = config_get(config, 'variables', 'ual_user_ids')
+        self.ual_free_text = config_get(config, 'variables', 'ual_free_text')
+        self.ual_ip_addresses = config_get(config, 'variables', 'ual_ip_addresses')
+        self.ual_object_ids = config_get(config, 'variables', 'ual_object_ids')
         self.tenantId = config_get(config, 'config', 'tenant')
-        self.ual_tasks = []
-        self.ual_results_cache = [] # used to store results in case of cross query interference
+        self.ual_tasks = []  # Active concurrent UAL sub-tasks
+        self.ual_results_cache = []  # Buffers results when API returns data for wrong time range
         self.ual_pbar = None
         self.date_range, self.date_start, self.date_end = get_date_range(config, self.logger)
 
         self.call_object = [self.endpoints["graph_api"] + "/beta/", self.app_auth, self.logger, self.output_dir, self.get_session()]
 
     async def run_exo_cmdlet(self, cmdlet, Parameters={}, timeout=120):
-        """
-        Run an exo powershell cmdlet and return the results
+        """Execute an Exchange Online PowerShell cmdlet via the AdminAPI REST endpoint.
+
+        This sends a POST to /adminapi/beta/{tenantId}/InvokeCommand with the cmdlet
+        name and parameters serialized as JSON. The AdminAPI translates this into a
+        remote PowerShell execution on the Exchange Online backend.
+
+        Args:
+            cmdlet: PowerShell cmdlet name (e.g. 'Search-UnifiedAuditLog', 'Get-Mailbox').
+            Parameters: Dict of cmdlet parameters to pass.
+            timeout: Request timeout in seconds (UAL queries may need longer timeouts).
+
+        Returns:
+            Tuple of (response_dict, error_string_or_None).
         """
         self.ensure_token("outlook_office_api")
         access_token = self.o365_app_auth["access_token"]
@@ -495,6 +534,11 @@ class M365DataDumper(DataDumper):
         return matching_bounds[0]["end"], total_estimated_logs
 
     def get_start_end_results(self, results):
+        """Find the earliest and latest CreationTime across a batch of UAL results.
+
+        Used to verify that returned results actually fall within the expected time bounds,
+        since the UAL API can sometimes return results outside the requested range.
+        """
         start = dateutil.parser.parse(json.loads(results[0]["AuditData"])["CreationTime"]).replace(tzinfo=None)
         end = start
         for idx, entry in enumerate(results):
@@ -505,18 +549,39 @@ class M365DataDumper(DataDumper):
         return start, end
 
     async def _new_ual_timeframe(self, start, end, retries=5, statefile=None, boundsfile=None, session_results=[], sessionId=None, isolated=False, caller=""):
-        """
-        Description:
-            Query the ual API to get information about the number of logs
+        """Core UAL collection engine: searches a time range and collects all audit logs.
 
-        Arguments:
-            start: starting timestamp
-            end: ending timestamp
-            retries=MAX_RETRIES: number of times to retry
-            statefile=None: filepath of statefile
-            isolated=False: Boolean for if the timeframe this function/task is dealing with has been isolated to a known good time bound.
+        This implements a binary-search approach to handle large log volumes:
+        1. Query Search-UnifiedAuditLog for the time range [start, end].
+        2. If ResultCount > threshold, halve the time range and retry (binary split).
+        3. If ResultCount <= threshold, paginate through results using sessionId.
+        4. Once all results for a time slice are collected, save to file and advance.
 
-        Returns:
+        The method operates in two modes:
+        - Non-isolated (initial): Explores the full time range, spawning isolated
+          sub-tasks for time slices that need full pagination.
+        - Isolated: Dedicated to a single time slice, uses larger ResultSize (5000)
+          and longer timeouts for efficient bulk retrieval.
+
+        Session handling:
+        - Each query uses a random sessionId to maintain server-side cursor state.
+        - The API's ReturnLargeSet command pages through results using the session.
+        - Duplicate detection handles cases where the API restarts a session mid-query.
+
+        Save state:
+        - Completed time ranges are saved to statefile so interrupted runs can resume.
+        - Bounds state tracks which sub-ranges have been searched and their log counts.
+
+        Args:
+            start: Start of the time range to search.
+            end: End of the time range to search.
+            retries: Max consecutive errors before giving up on a time slice.
+            statefile: Path to save completed time ranges for resume support.
+            boundsfile: Path to save bounds state (searched sub-ranges).
+            session_results: Pre-existing results when continuing an isolated session.
+            sessionId: Pre-existing session ID when continuing an isolated session.
+            isolated: True when this is a dedicated sub-task for a single time slice.
+            caller: Name of the parent task for labeling sub-tasks.
         """
 
         response_count = 0
@@ -534,23 +599,24 @@ class M365DataDumper(DataDumper):
         end, totalResultCount = self.find_bounds_end_size(start, end)
         #self.logger.debug(f"start/end after bounds {start}/{end}")
 
+        # Outer loop: advances through the full time range [start, finalEnd].
+        # Each iteration handles one time slice, advancing `start` on success.
         while start < finalEnd and tries < retries:
-            # Can't have a time period with no time in between
+            # Ensure the time slice has a non-zero duration
             startDate = start.strftime("%Y-%m-%dT%H:%M:%S")
             endDate = end.strftime("%Y-%m-%dT%H:%M:%S")
             if startDate == endDate:
                 end += timedelta(seconds=1)
                 endDate = end.strftime("%Y-%m-%dT%H:%M:%S")
-            # continue the session if this is a created task
+            # Start a new search session unless continuing an existing isolated one
             if not continuing:
                 session_results = []
                 sessionId = str(random.randint(SESSION_ID_MIN, SESSION_ID_MAX))
             continuing = False
             sessionCount = -1
-            session_set = set() # Unique results returned. Used to detect duplicates
+            session_set = set()
             bound = f'[{startDate} - {endDate}]'
-            #self.logger.debug(f'===> Trying to find a bounding for {bound}')
-            # Inner loop for a session search. Denoted by the sessionId
+            # Inner loop: pages through results within a single session/time slice
             status_code = None
             session_timeout = 60
             data_saved = False
@@ -567,8 +633,21 @@ class M365DataDumper(DataDumper):
                      'StartDate': startDate,
                      'EndDate': endDate
                 }
-                # more efficient to use lower ResultSize to find a session.
-                # Afterwards use the maximum ResultSize and higher timeout
+                # Inject UAL filter parameters if configured
+                if self.ual_record_type:
+                    parameters['RecordType'] = self.ual_record_type
+                if self.ual_operations:
+                    parameters['Operations'] = self.ual_operations
+                if self.ual_user_ids:
+                    parameters['UserIds'] = self.ual_user_ids
+                if self.ual_free_text:
+                    parameters['FreeText'] = self.ual_free_text
+                if self.ual_ip_addresses:
+                    parameters['IPAddresses'] = self.ual_ip_addresses
+                if self.ual_object_ids:
+                    parameters['ObjectIds'] = self.ual_object_ids
+                # Non-isolated mode uses small ResultSize (100) for fast initial probing.
+                # Isolated mode uses max ResultSize (5000) and longer timeout for bulk download.
                 if isolated:
                     resultSize = 5000
                     parameters["ResultSize"] = str(resultSize)
@@ -615,7 +694,9 @@ class M365DataDumper(DataDumper):
                     sessionCount = int(response_dict['value'][0]['ResultCount'])
                     totalResultCount = max(sessionCount, totalResultCount)
 
-                    # The ual api will sometimes produce duplicate results.
+                    # --- Duplicate detection ---
+                    # The UAL API can produce duplicate results across pages, or restart
+                    # sessions silently. We track unique AuditData IDs to detect both cases.
                     session_oldset = set([json.loads(result["AuditData"])["Id"] for result in session_results])
                     session_newset = set([json.loads(result["AuditData"])["Id"] for result in response_dict['value']])
                     session_set = session_oldset.union(session_newset)
@@ -623,9 +704,9 @@ class M365DataDumper(DataDumper):
                     new_duplicates = abs(sessionCount - len(session_newset))
                     total_duplicates = abs(len(session_results) + sessionCount - len(session_set))
                     duplicate_difference = abs(new_duplicates - old_duplicates)
-                    # Check if the session has restarted by seeing if the difference in
-                    # duplicates is the same as the total amount of new logs or old logs. In this
-                    # case we will discard the earlier results and continue with the session.
+                    # Detect session restart: if ALL new results are duplicates of old ones
+                    # (or vice versa), the server has restarted the session. Discard old results
+                    # and continue with the fresh session to avoid double-counting.
                     if total_duplicates - old_duplicates == sessionCount \
                        or total_duplicates - new_duplicates == len(session_results):
                         session_results = []
@@ -635,9 +716,11 @@ class M365DataDumper(DataDumper):
                         self.logger.debug(f"Duplicates found. Found {len(session_set)} unique results. Expected {len(session_results)}.")
 
 
-                    # Check if ual cache is needed. Results need to be within time bounds
-                    # and the result size either needs to match the number of logs within that
-                    # time range or be equal to the number of logs expected to be pulled
+                    # --- Result validation and cache ---
+                    # The UAL API occasionally returns results from the wrong time range
+                    # (cross-query interference). Validate that results fall within [start, end]
+                    # and that the count matches expectations. If not, cache the results and
+                    # check if a previously cached batch is the correct one for this range.
                     response_start, response_end = self.get_start_end_results(response_dict['value'])
                     response_len = len(response_dict['value'])
                     self.logger.debug(f"{response_len} records returned from response")
@@ -676,7 +759,8 @@ class M365DataDumper(DataDumper):
                                        "count": sessionCount,
                                        "done_status": False}, boundsfile=boundsfile)
 
-                    # check if within log threshold and the time difference is greater than 2 seconds
+                    # Binary split: if too many logs in this time slice, halve the range.
+                    # The 2-second minimum prevents infinite splitting on dense log bursts.
                     if sessionCount > self.threshold and end - start >= timedelta(seconds=2):
                         self.logger.debug(f"{sessionCount} results found within bounds. Exceeds result limit {self.threshold}")
                         # half the difference between the start and end time
@@ -692,8 +776,9 @@ class M365DataDumper(DataDumper):
                         # break out of session loop if all logs collected
                         break
                     elif not isolated:
-                        # This is where we will isolate this timeframe as a coroutine task just for this timeframe and then start another task to pull the rest
-                        # Can't continue until some of the tasks are done
+                        # Spin off an isolated sub-task to finish paginating this time slice,
+                        # while the main task continues exploring the next time range.
+                        # Throttle concurrent tasks to max_ual_tasks to avoid API overload.
                         while len(self.ual_tasks) >= self.max_ual_tasks:
                             self.logger.debug("Waiting for ual dumpers to complete before starting more")
                             finished, ual_tasks_l = await asyncio.wait(self.ual_tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -757,18 +842,33 @@ class M365DataDumper(DataDumper):
             await asyncio.gather(*self.ual_tasks)
 
     async def dump_ual(self):
-        """Dumps UAL for last year using Search-UnifiedAuditLog api. Previous ual api is currently deprecated.
+        """Collect the Unified Audit Log (UAL) via Search-UnifiedAuditLog.
 
-        https://learn.microsoft.com/en-us/powershell/module/exchange/search-unifiedauditlog?view=exchange-ps
+        The UAL is the primary audit log for M365. This method:
+        1. Determines the time range to search (default: last 364 days, or from .conf filters).
+        2. Loads save state to find already-completed time ranges and skip them.
+        3. Handles an optional "extra" time range (ual_extra_start/end) for additional coverage.
+        4. Merges completed ranges with the target range to find gaps that still need collection.
+        5. Spawns _new_ual_timeframe tasks for each gap, which handle the actual API queries.
 
+        Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/search-unifiedauditlog
         """
         statefile = f'{self.output_dir}{os.path.sep}.ual_state'
         boundsfile = f'{self.output_dir}{os.path.sep}.ual_bounds'
 
-        # default end time
-        end = get_end_time_yesterday()
+        # Log active UAL filters
+        active_filters = {}
+        if self.ual_record_type: active_filters['RecordType'] = self.ual_record_type
+        if self.ual_operations: active_filters['Operations'] = self.ual_operations
+        if self.ual_user_ids: active_filters['UserIds'] = self.ual_user_ids
+        if self.ual_free_text: active_filters['FreeText'] = self.ual_free_text
+        if self.ual_ip_addresses: active_filters['IPAddresses'] = self.ual_ip_addresses
+        if self.ual_object_ids: active_filters['ObjectIds'] = self.ual_object_ids
+        if active_filters:
+            self.logger.info(f"UAL filters active: {active_filters}")
 
-        # Default start time
+        # Default: collect the last 364 days (UAL max retention is typically 1 year)
+        end = get_end_time_yesterday()
         start = end - timedelta(days=364)
 
         if self.date_range:
@@ -776,15 +876,18 @@ class M365DataDumper(DataDumper):
             start = datetime.strptime(self.date_start,"%Y-%m-%d")
             end = datetime.strptime(self.date_end,"%Y-%m-%d")
 
+        # Restore bounds state from previous run (tracks sub-range search progress)
         bounds_save_state = load_state(boundsfile, is_datetime=False, time_bounds=True)
         if bounds_save_state != None:
             self.ual_bounds_state = bounds_save_state
 
+        # Load completed time ranges to find gaps that still need collection
         finished_time_ranges = load_state(statefile, is_datetime=False, time_range=True)
 
         search_time_ranges = []
 
-        # Check if the extra times were set
+        # Handle optional extra time range (ual_extra_start/end in .conf).
+        # If it overlaps the main range, merge them to avoid duplicate queries.
         if self.ual_extra_start:
             extra_start = datetime.strptime(self.ual_extra_start,"%Y-%m-%d")
             extra_end = get_end_time_yesterday()

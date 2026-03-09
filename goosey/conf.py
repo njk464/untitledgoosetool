@@ -2,7 +2,9 @@
 # -*- coding: utf-8 -*-
 
 """Untitled Goose Tool: generate_conf
-This script creates a blank configuration file to use.
+Interactive configuration file generator. Creates .conf and .auth files with all
+available options for each platform (M365, Entra ID, Azure, MDE, D4IoT).
+Auto-discovers dump_* methods from each datadumper class to populate config sections.
 """
 import configparser
 import fire
@@ -46,6 +48,8 @@ def genconf(outpath_auth=".auth",
             outpath_conf=".conf",
             auth_appid=None,
             auth_clientsecret=None,
+            auth_ests_cookie=None,
+            auth_portal_refresh_token=None,
             #prompt_needed=False,
             #prompt_all=False,
             #collection_level=0,
@@ -59,6 +63,12 @@ def genconf(outpath_auth=".auth",
             variable_max_ual_tasks=5,
             variable_ual_extra_start=None,
             variable_ual_extra_end=None,
+            variable_ual_record_type=None,
+            variable_ual_operations=None,
+            variable_ual_user_ids=None,
+            variable_ual_free_text=None,
+            variable_ual_ip_addresses=None,
+            variable_ual_object_ids=None,
             variable_mde_threshold=10000,
             variable_mde_query_mode="table",
             azure=False,
@@ -87,6 +97,8 @@ def genconf(outpath_auth=".auth",
         outpath_conf: Path to output the goose config
         auth_appid: The application ID of your service principal
         auth_clientsecret: The client secret value of your service principal. WARNING should not be provided in goosey conf arguments unless doing testing
+        auth_ests_cookie: Optional ESTSAUTHPERSISTENT cookie from security.microsoft.com for MDE portal timeline collection. Get this from your browser DevTools after logging into security.microsoft.com
+        auth_portal_refresh_token: Optional OAuth refresh token for M365 Security Center portal access. Alternative to ESTS cookie that auto-refreshes. Obtain via device code flow or browser token extraction
         config_tenant: The tenant ID of your AAD tenant
         config_gcc: If you have a GCC tenant
         config_gcc_high: If you have a GCC High tenant
@@ -97,6 +109,12 @@ def genconf(outpath_auth=".auth",
         variable_max_ual_tasks: Maximum number of ual coroutines/tasks to have running asynchronously. Minimum value is 1.
         variable_ual_extra_start: Start date for an extra time frame for ual to search. Reason for this is because ual takes the longest to pull and while you don't want the oldest data to roll off, you may want to look at another timeframe and do not want to wait for ual to get there and pull the logs. Format should be YYY-MM-DD
         variable_ual_extra_end: End date for an extra time frame for ual to search. Reason for this is because ual takes the longest to pull and while you don't want the oldest data to roll off, you may want to look at another timeframe and do not want to wait for ual to get there and pull the logs. Format should be YYY-MM-DD
+        variable_ual_record_type: Filter UAL by record type. Comma-separated list of record types (e.g. ExchangeAdmin,SharePointFileOperation,AzureActiveDirectory). See https://learn.microsoft.com/en-us/office/office-365-management-api/office-365-management-activity-api-schema#auditlogrecordtype
+        variable_ual_operations: Filter UAL by operation type. Comma-separated list (e.g. FileAccessed,UserLoggedIn,Add member to role)
+        variable_ual_user_ids: Filter UAL by user. Comma-separated list of UPNs or email addresses (e.g. user@contoso.com,admin@contoso.com)
+        variable_ual_free_text: Filter UAL by free text search string
+        variable_ual_ip_addresses: Filter UAL by IP address. Comma-separated list (e.g. 192.168.1.1,10.0.0.1)
+        variable_ual_object_ids: Filter UAL by object ID. Comma-separated list of object identifiers (e.g. file paths, site URLs, user accounts)
         variable_mde_threshold: Threshold for how many logs to pull per query. Usually want to try to max this out as KQL queries are rate limited.
         variable_mde_query_mode: can be either 'table' or 'machine'. 'table' will pull directly from the mde tables without filtering. While 'machine' will filter by 'machine' with large tenants 'machine' will likely be prefered as time bounding on the entire table will likely cause issues.
         azure: Enable all azure log collection

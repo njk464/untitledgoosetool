@@ -14,6 +14,7 @@ import io
 import json
 import msal
 import os
+import re
 import requests
 import sys
 import time
@@ -24,8 +25,15 @@ from goosey.utils import *
 green = "\x1b[1;32m"
 
 class Authentication():
-    """
-    Authentication class for Untitled Goose Tool
+    """Handles OAuth authentication for all supported Microsoft cloud platforms.
+
+    Supports two auth paths:
+    - Standard (MSAL): Client credential flow for Graph, O365, ARM, Security Center, Log Analytics.
+      Tokens are stored in the .ugt_auth file as JSON keyed by endpoint name.
+    - D4IoT: Cookie-based auth via CSRF token + session cookie, stored in .d4iot_auth.
+
+    Auth credentials (app ID, client secret, or D4IoT username/password) are read from
+    the .auth file (optionally AES-encrypted) or prompted interactively.
     """
     def __init__(self, debug=False):
         self.tokendata = {}
@@ -62,8 +70,17 @@ class Authentication():
         return app_resource_uris
 
     def authenticate_as_app(self, resource_uri):
-        """
-        Authenticate with an application id + client secret (password credentials assigned to serviceprinicpal)
+        """Acquire an OAuth token using the client credentials (app ID + secret) flow.
+
+        Uses MSAL's ConfidentialClientApplication to get a token for the given resource.
+        Adds an absolute 'expires_on' timestamp (epoch seconds) to the token dict so
+        downstream code (TokenManager) can check expiry without parsing relative times.
+
+        Args:
+            resource_uri: The scope/resource URI to authenticate against (e.g. "https://graph.microsoft.com/.default").
+
+        Returns:
+            dict: The token data including access_token, token_type, expires_on, etc.
         """
         authority_uri = self.get_authority_url()
         self.logger.debug(f"App Authentication authority uri: {str(authority_uri)}")
@@ -77,11 +94,13 @@ class Authentication():
             else:
                 self.logger.error("There was an issue with your application auth: " + self.tokendata['error_description'])
         if 'expires_in' in self.tokendata:
+            # Convert relative expiry (seconds from now) to absolute epoch timestamp
             expiration_time = time.time() + self.tokendata['expires_in']
             self.tokendata['expires_on'] = expiration_time
         return self.tokendata
 
     def parse_config(self, configfile):
+        """Parse the .conf file to load tenant settings, cloud type (GCC/GCC High), and endpoint URLs."""
         config = configparser.ConfigParser()
         config.read(configfile)
         if not self.d4iot:
@@ -97,6 +116,12 @@ class Authentication():
         return config
 
     def parse_auth(self, authstr=None):
+        """Parse the .auth credentials file or prompt the user for credentials interactively.
+
+        For standard auth: reads appid and clientsecret.
+        For D4IoT: reads username, password, sensor token, and management console token.
+        Missing values are prompted via getpass (hidden input).
+        """
         self.authconfig = configparser.ConfigParser()
         auth_dict = {}
         if authstr:
@@ -137,6 +162,18 @@ class Authentication():
             else:
                 self.client_secret = getpass.getpass("Please type your client secret: ")
             auth_dict["clientsecret"] = self.client_secret
+
+            # Optional ESTS cookie for MDE portal timeline APIs
+            self.ests_cookie = ""
+            if config_get(self.authconfig, 'auth', 'ests_cookie', self.logger):
+                self.ests_cookie = config_get(self.authconfig, 'auth', 'ests_cookie', self.logger)
+            auth_dict["ests_cookie"] = self.ests_cookie
+
+            # Optional OAuth refresh token for portal access (alternative to ESTS cookie)
+            self.portal_refresh_token = ""
+            if config_get(self.authconfig, 'auth', 'portal_refresh_token', self.logger):
+                self.portal_refresh_token = config_get(self.authconfig, 'auth', 'portal_refresh_token', self.logger)
+            auth_dict["portal_refresh_token"] = self.portal_refresh_token
         self.authconfig["auth"] = auth_dict
 
     def _read_current_tokens(self, filepath: str):
@@ -151,6 +188,14 @@ class Authentication():
         write_auth(filepath, writestr, logger=self.logger, encryption_pw=self.encryption_pw, insecure=self.insecure)
 
     def d4iot_auth(self):
+        """Authenticate to a Defender for IoT sensor using cookie-based auth.
+
+        The flow is:
+        1. GET the sensor URL to obtain an initial CSRF token from cookies.
+        2. POST username/password to /api/authentication/login with the CSRF token.
+        3. Extract the session cookie (csrftoken + sessionid) from the response.
+        4. Store cookies in the D4IoT auth file for use by DefenderIoTDumper.
+        """
         custom_auth_dict = self._read_current_tokens(self.d4iot_authfile)
 
         if 'sensor' not in custom_auth_dict:
@@ -194,8 +239,180 @@ class Authentication():
             self.logger.info(green + "Authentication complete." + green)
             self._write_current_tokens(self.d4iot_authfile, custom_auth_dict)
 
-    def ugt_auth(self):
+    def portal_auth(self):
+        """Bootstrap a portal session for M365 Defender timeline APIs.
 
+        Supports two authentication methods:
+        1. OAuth refresh token (preferred): Uses a refresh token to obtain a Bearer
+           access token for the M365 Security Center. More reliable for long-running
+           collections since tokens auto-refresh. Set portal_refresh_token in .auth.
+        2. ESTS cookie (fallback): Uses an ESTSAUTHPERSISTENT cookie from the user's
+           browser to obtain sccauth and xsrf-token session cookies.
+
+        Stores portal_auth dict in .ugt_auth with auth credentials for portal API access.
+        """
+        if not self.ests_cookie and not self.portal_refresh_token:
+            self.logger.info("No portal credentials provided. Skipping portal auth "
+                             "(timeline collection will be unavailable). "
+                             "Set ests_cookie or portal_refresh_token in .auth.")
+            return
+
+        portal_url = "https://security.microsoft.com"
+
+        # Prefer refresh token auth over ESTS cookie (more reliable for long runs)
+        if self.portal_refresh_token:
+            self._portal_auth_refresh_token(portal_url)
+        else:
+            self._portal_auth_ests_cookie(portal_url)
+
+    def _portal_auth_refresh_token(self, portal_url):
+        """Authenticate to the M365 Security portal using an OAuth refresh token.
+
+        Uses the Microsoft Teams first-party client ID to exchange a refresh token
+        for an access token scoped to the M365 Security Center resource. The resulting
+        Bearer token is sent directly in the Authorization header, bypassing the need
+        for sccauth/xsrf cookies entirely.
+
+        The refresh token is updated on each exchange (rolling refresh tokens).
+        """
+        self.logger.info("Authenticating to M365 Security portal via OAuth refresh token...")
+
+        # Microsoft Teams client ID (first-party app with portal access)
+        client_id = "1fec8e78-bce4-4aaf-ab1b-5451cc387264"
+        # M365 Security Center resource ID
+        scope = "80ccca67-54bd-44ab-8625-4b79c4dc7775/.default offline_access"
+        token_url = f"https://login.microsoftonline.com/{self.tenant}/oauth2/v2.0/token"
+
+        try:
+            resp = requests.post(token_url, data={
+                'client_id': client_id,
+                'scope': scope,
+                'grant_type': 'refresh_token',
+                'refresh_token': self.portal_refresh_token,
+            }, timeout=30)
+
+            if resp.status_code != 200:
+                self.logger.error(f"Portal refresh token auth failed (HTTP {resp.status_code}): {resp.text[:500]}")
+                # Fall back to ESTS cookie if available
+                if self.ests_cookie:
+                    self.logger.info("Falling back to ESTS cookie auth...")
+                    self._portal_auth_ests_cookie(portal_url)
+                return
+
+            token_data = resp.json()
+            access_token = token_data.get('access_token')
+            new_refresh_token = token_data.get('refresh_token')
+            expires_in = token_data.get('expires_in', 3600)
+
+            if not access_token:
+                self.logger.error("Portal refresh token auth returned no access token.")
+                return
+
+            portal_auth_data = {
+                'access_token': access_token,
+                'token_type': 'Bearer',
+                'expires_in': expires_in,
+                'portal_url': portal_url,
+                'tenant_id': self.tenant,
+                'auth_method': 'refresh_token',
+            }
+
+            # Update stored refresh token if a new one was issued (rolling tokens)
+            custom_auth_dict = self._read_current_tokens(self.authfile)
+            if new_refresh_token and new_refresh_token != self.portal_refresh_token:
+                self.portal_refresh_token = new_refresh_token
+                if 'auth' not in custom_auth_dict:
+                    custom_auth_dict['auth'] = {}
+                custom_auth_dict['auth']['portal_refresh_token'] = new_refresh_token
+
+            custom_auth_dict['portal_auth'] = portal_auth_data
+            self._write_current_tokens(self.authfile, custom_auth_dict)
+
+            self.logger.info(green + "Portal authentication complete (refresh token)." + green)
+
+        except requests.exceptions.RequestException as e:
+            self.logger.error(f"Portal refresh token auth failed: {e}")
+
+    def _portal_auth_ests_cookie(self, portal_url):
+        """Authenticate to the M365 Security portal using an ESTS cookie.
+
+        Uses an ESTSAUTHPERSISTENT cookie (from the user's browser at
+        security.microsoft.com) to obtain sccauth and xsrf-token session cookies.
+        """
+        self.logger.info("Bootstrapping M365 Defender portal session via ESTS cookie...")
+
+        try:
+            # Hit the portal with the ESTS cookie to get sccauth + xsrf-token
+            session = requests.Session()
+            session.cookies.set('ESTSAUTHPERSISTENT', self.ests_cookie, domain='.microsoft.com')
+            session.headers.update({
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36 Edg/142.0.0.0',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            })
+
+            resp = session.get(portal_url, allow_redirects=True, timeout=60)
+            resp.raise_for_status()
+
+            # Extract sccauth cookie
+            sccauth = session.cookies.get('sccauth', domain='security.microsoft.com')
+            if not sccauth:
+                # Try without domain filter
+                for cookie in session.cookies:
+                    if cookie.name == 'sccauth':
+                        sccauth = cookie.value
+                        break
+
+            if not sccauth:
+                self.logger.error("Failed to obtain sccauth cookie from portal. "
+                                  "ESTS cookie may be expired or invalid.")
+                return
+
+            # Extract XSRF token from response body or cookies
+            xsrf_token = ""
+            # Check cookies first
+            for cookie in session.cookies:
+                if cookie.name.lower() in ('xsrf-token', 'xsrf_token'):
+                    xsrf_token = cookie.value
+                    break
+
+            # Fall back to parsing from response body
+            if not xsrf_token:
+                match = re.search(r'"xsrfToken"\s*:\s*"([^"]+)"', resp.text)
+                if match:
+                    xsrf_token = match.group(1)
+
+            if not xsrf_token:
+                self.logger.warning("Could not extract XSRF token. Portal API calls may fail.")
+
+            portal_auth_data = {
+                'sccauth': sccauth,
+                'xsrf_token': xsrf_token,
+                'portal_url': portal_url,
+                'ests_cookie': self.ests_cookie,
+                'tenant_id': self.tenant,
+                'auth_method': 'ests_cookie',
+            }
+
+            # Store in auth file
+            custom_auth_dict = self._read_current_tokens(self.authfile)
+            custom_auth_dict['portal_auth'] = portal_auth_data
+            self._write_current_tokens(self.authfile, custom_auth_dict)
+
+            self.logger.info(green + "Portal authentication complete (ESTS cookie)." + green)
+
+        except requests.exceptions.RequestException as e:
+            self.logger.error(f"Portal auth failed: {e}")
+
+    def ugt_auth(self):
+        """Authenticate to all Microsoft cloud endpoints using client credentials.
+
+        Iterates over each endpoint (Graph, O365, ARM, Security Center, Log Analytics, etc.)
+        and acquires a token for each one. All tokens are stored in a single .ugt_auth JSON file
+        under 'app_auth', keyed by endpoint name (e.g. 'graph_api', 'securitycenter_api').
+
+        Also stores SDK credentials (tenant_id, app_id, client_secret) under 'sdk_auth'
+        so TokenManager can refresh tokens mid-run without re-prompting.
+        """
         custom_auth_dict = self._read_current_tokens(self.authfile)
 
         self._write_current_tokens(self.authfile, custom_auth_dict)
@@ -207,12 +424,14 @@ class Authentication():
         if 'sdk_auth' not in custom_auth_dict:
             custom_auth_dict['sdk_auth'] = {}
 
+        # Store credentials so TokenManager can re-authenticate during long runs
         custom_auth_dict['sdk_auth']['tenant_id'] = self.tenant
         custom_auth_dict['sdk_auth']['app_id'] = self.app_client_id
         custom_auth_dict['sdk_auth']['client_secret'] = self.client_secret
         custom_auth_dict['sdk_auth']['subscriptionid'] = self.subscriptions
 
         resource_uri = self.get_app_resource_uri()
+        # Acquire a token for each Microsoft API endpoint
         for key, uri in resource_uri.items():
             try:
                 if self.client_secret and self.app_client_id:
@@ -228,7 +447,11 @@ class Authentication():
                     custom_auth_dict['app_auth'][key]['expireTime'] = expiretime
         self._write_current_tokens(self.authfile, custom_auth_dict)
 
+        # Bootstrap portal session if ESTS cookie is available (for MDE timeline APIs)
+        self.portal_auth()
+
     def parse_args(self, args):
+        """Initialize from CLI args: set up logger, read/decrypt config and auth files, prompt if needed."""
         self.debug = args.debug
         self.logger = setup_logger(__name__, self.debug)
         self.authfile = args.authfile
@@ -269,17 +492,26 @@ class TokenManager:
     _REFRESH_MARGIN_SECONDS = 300  # Refresh 5 minutes before expiry
 
     def __init__(self, auth_dict, endpoints_dict, logger):
+        """
+        Args:
+            auth_dict: The full auth dictionary (same object shared by all dumpers).
+                       Contains 'app_auth' (tokens per endpoint) and 'sdk_auth' (credentials).
+            endpoints_dict: Maps endpoint keys to base URLs for scope construction.
+            logger: Logger instance for refresh status messages.
+        """
         self._auth_dict = auth_dict
         self._endpoints_dict = endpoints_dict
         self._logger = logger
-        self._msal_app = None
+        self._msal_app = None  # Lazy-initialized MSAL app (created on first refresh)
 
+        # Extract credentials stored by ugt_auth() for re-authentication
         sdk = auth_dict.get('sdk_auth', {})
         self._tenant_id = sdk.get('tenant_id')
         self._app_id = sdk.get('app_id')
         self._client_secret = sdk.get('client_secret')
 
     def _get_msal_app(self):
+        """Lazy-initialize the MSAL ConfidentialClientApplication (reused across refreshes)."""
         if self._msal_app is None:
             authority = f"{self._endpoints_dict['authority_api']}/{self._tenant_id}"
             self._msal_app = msal.ConfidentialClientApplication(
@@ -320,7 +552,9 @@ class TokenManager:
                 return
             if 'expires_in' in result:
                 result['expires_on'] = time.time() + result['expires_in']
-            # Mutate the dict in place so all references are updated
+            # IMPORTANT: Mutate in-place (dict.update) rather than reassigning.
+            # All dumpers hold references to the same token dict, so in-place
+            # mutation ensures every holder sees the refreshed token immediately.
             token_data.update(result)
             self._logger.info(f"Token for {endpoint_key} refreshed successfully.")
         except Exception as e:

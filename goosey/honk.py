@@ -2,7 +2,17 @@
 # -*- coding: utf-8 -*-
 
 """Untitled Goose Tool: Honk!
-This module performs data collection of various data sources from an Azure/M365 environment.
+This is the main orchestrator module that coordinates data collection across all platforms.
+
+The `honk` command:
+1. Reads auth tokens from .ugt_auth and credentials from .auth
+2. Parses the .conf file to determine which data sources are enabled
+3. Creates platform-specific dumper instances (M365, Entra ID, Azure, MDE)
+4. Schedules all enabled dump_* methods as concurrent asyncio tasks
+5. Runs all tasks via asyncio.gather() and reports results
+
+The `autohonk` command wraps honk with automatic authentication and token refresh
+via TokenManager, enabling unattended long-running collection.
 """
 
 import aiohttp
@@ -50,6 +60,9 @@ async def run(args, config, auth, init_sections, auth_un_pw=None):
 
     session = aiohttp.ClientSession(trust_env=True)
 
+    # Extract per-endpoint token dicts from the auth file.
+    # These are mutable dicts — TokenManager will update them in-place when refreshing,
+    # so all dumpers holding references automatically see fresh tokens.
     msft_graph_app_auth = {}
     loganalytics_app_auth = {}
 
@@ -60,7 +73,7 @@ async def run(args, config, auth, init_sections, auth_un_pw=None):
     loganalytics_app_auth = auth["app_auth"]["log_analytics_api"]
     msft_security_auth = auth["app_auth"]["security_api"]
 
-    # Create TokenManager for automatic token refresh
+    # TokenManager monitors token expiry and refreshes proactively (5 min before expiry)
     gcc = config_get(config, 'config', 'gcc', logger)
     gcc = gcc.lower() == "true" if gcc else False
     gcc_high = config_get(config, 'config', 'gcc_high', logger)
@@ -89,7 +102,8 @@ async def run(args, config, auth, init_sections, auth_un_pw=None):
             azure_dumper = AzureDataDumper(args.output_dir, args.reports_dir, maindumper.ahsession, mgmt_app_auth, config, auth_un_pw, loganalytics_app_auth, args.debug, token_manager=token_manager)
             azure = True
         if 'mde' in init_sections:
-            mdedumper = MDEDataDumper(args.output_dir, args.reports_dir, msft_security_center_auth, msft_security_auth, maindumper.ahsession, config, args.debug, token_manager=token_manager)
+            portal_auth = auth.get('portal_auth')
+            mdedumper = MDEDataDumper(args.output_dir, args.reports_dir, msft_security_center_auth, msft_security_auth, maindumper.ahsession, config, args.debug, token_manager=token_manager, portal_auth=portal_auth)
             mde = True
 
     pm = init_progress_manager(enabled=not args.debug)
@@ -137,6 +151,17 @@ def _get_section_dict(config, s):
     return get_section_dict(config, s, logger)
 
 def parse_config(configfile, args, auth=None):
+    """Parse the .conf file and determine which dump methods to run.
+
+    The .conf file has sections like [m365], [entraid], [azure], [mde] with boolean
+    options (e.g. ual=true, exo_mailbox=true). Each enabled option maps to a dump_<key>
+    method in the corresponding dumper class.
+
+    CLI flags (--azure, --m365, etc.) override the config to enable ALL methods for a platform.
+
+    Returns:
+        Tuple of (config, init_sections) where init_sections lists which platforms to initialize.
+    """
     global data_calls
     config = configparser.ConfigParser()
     config.read(configfile)
@@ -155,6 +180,7 @@ def parse_config(configfile, args, auth=None):
                 data_calls[section][key] = True
                 init_sections.append(section)
 
+    # CLI flags override .conf: enable ALL dump_* methods for the specified platform
     logger.debug(args.__dict__)
     if args.azure:
         for item in [x.replace('dump_', '') for x in dir(AzureDataDumper) if x.startswith('dump_')]:
@@ -173,6 +199,28 @@ def parse_config(configfile, args, auth=None):
             data_calls['mde'][item] = True
         init_sections.append("mde")
 
+    # Apply CLI overrides to config sections (CLI args take precedence over .conf values)
+    cli_overrides = {
+        'config': {'tenant': 'tenant', 'gcc': 'gcc', 'gcc_high': 'gcc_high', 'subscriptionid': 'subscriptionid'},
+        'filters': {'date_start': 'date_start', 'date_end': 'date_end'},
+        'variables': {
+            'ual_threshold': 'ual_threshold', 'max_ual_tasks': 'max_ual_tasks',
+            'ual_extra_start': 'ual_extra_start', 'ual_extra_end': 'ual_extra_end',
+            'ual_record_type': 'ual_record_type', 'ual_operations': 'ual_operations',
+            'ual_user_ids': 'ual_user_ids', 'ual_free_text': 'ual_free_text',
+            'ual_ip_addresses': 'ual_ip_addresses', 'ual_object_ids': 'ual_object_ids',
+            'mde_threshold': 'mde_threshold', 'mde_query_mode': 'mde_query_mode',
+        },
+    }
+    for section, mappings in cli_overrides.items():
+        for conf_key, attr_name in mappings.items():
+            val = getattr(args, attr_name, None)
+            if val is not None:
+                if not config.has_section(section):
+                    config.add_section(section)
+                config.set(section, conf_key, str(val))
+                logger.debug(f"CLI override: [{section}] {conf_key} = {val}")
+
     logger.debug(json.dumps(data_calls, indent=2))
     return config, init_sections
 
@@ -187,7 +235,28 @@ def honk(authfile=".ugt_auth",
          entraid=False,
          m365=False,
          mde=False,
-         encryption_pw=None):
+         encryption_pw=None,
+         # [config] overrides
+         tenant=None,
+         gcc=None,
+         gcc_high=None,
+         subscriptionid=None,
+         # [filters] overrides
+         date_start=None,
+         date_end=None,
+         # [variables] overrides
+         ual_threshold=None,
+         max_ual_tasks=None,
+         ual_extra_start=None,
+         ual_extra_end=None,
+         ual_record_type=None,
+         ual_operations=None,
+         ual_user_ids=None,
+         ual_free_text=None,
+         ual_ip_addresses=None,
+         ual_object_ids=None,
+         mde_threshold=None,
+         mde_query_mode=None):
     """
     Untitled Goose Tool Information Gathering
 
@@ -204,6 +273,24 @@ def honk(authfile=".ugt_auth",
         m365: Set all of the M365 calls to true
         mde: Set all of the MDE calls to true
         encryption_pw: Password for the auth file encryption. SHOULD ONLY BE USED WITH AUTOHONK
+        tenant: Override tenant ID from .conf
+        gcc: Override GCC setting (true/false)
+        gcc_high: Override GCC High setting (true/false)
+        subscriptionid: Override Azure subscription ID(s)
+        date_start: Override date range start (YYYY-MM-DD)
+        date_end: Override date range end (YYYY-MM-DD)
+        ual_threshold: Override UAL threshold (100-50000)
+        max_ual_tasks: Override max concurrent UAL tasks
+        ual_extra_start: Override UAL extra time range start (YYYY-MM-DD)
+        ual_extra_end: Override UAL extra time range end (YYYY-MM-DD)
+        ual_record_type: Filter UAL by record type (comma-separated)
+        ual_operations: Filter UAL by operation type (comma-separated)
+        ual_user_ids: Filter UAL by user (comma-separated UPNs)
+        ual_free_text: Filter UAL by free text search
+        ual_ip_addresses: Filter UAL by IP address (comma-separated)
+        ual_object_ids: Filter UAL by object ID (comma-separated)
+        mde_threshold: Override MDE query threshold
+        mde_query_mode: Override MDE query mode (table or machine)
     """
     global logger
     args = dict2obj(locals())
@@ -244,7 +331,8 @@ def autohonk(authfile=".ugt_auth",
          entraid=False,
          m365=False,
          mde=False,
-         insecure=False):
+         insecure=False,
+         **kwargs):
     """
     Untitled Goose Tool Information Gathering. With auto authentication!
     Authenticates once, then runs collection to completion with automatic token refresh.
@@ -261,6 +349,9 @@ def autohonk(authfile=".ugt_auth",
         m365: Set all of the M365 calls to true
         mde: Set all of the MDE calls to true
         insecure: Disable secure authentication handling (file encryption)
+
+    All other keyword arguments (tenant, gcc, date_start, ual_threshold, etc.)
+    are passed through to honk() as CLI overrides for .conf values.
     """
     encryption_pw = None
     if not insecure:
@@ -288,6 +379,7 @@ def autohonk(authfile=".ugt_auth",
         m365=m365,
         mde=mde,
         encryption_pw=encryption_pw,
+        **kwargs,
     )
 
 
