@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """Untitled Goose Tool: Main!
+Entry point module. Maps CLI subcommands to functions via Google's python-fire library.
+Commands: auth, honk, autohonk, conf, csv, d4iot, version.
 """
 
 import argparse

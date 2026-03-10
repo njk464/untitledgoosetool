@@ -81,7 +81,8 @@ async def run(args, config, auth, init_sections, auth_un_pw=None):
     endpoints_dict = get_endpoints(gcc=gcc, gcc_high=gcc_high)
     token_manager = TokenManager(auth, endpoints_dict, logger)
 
-    maindumper = DataDumper(args.output_dir, args.reports_dir, msft_graph_app_auth, session, args.debug, token_manager=token_manager, endpoint_key="graph_api")
+    force_repull = getattr(args, 'force_repull', False)
+    maindumper = DataDumper(args.output_dir, args.reports_dir, msft_graph_app_auth, session, args.debug, token_manager=token_manager, endpoint_key="graph_api", force_repull=force_repull)
 
     m365, entraid, azure, mde = False, False, False, False
 
@@ -93,20 +94,21 @@ async def run(args, config, auth, init_sections, auth_un_pw=None):
 
     else:
         if 'm365' in init_sections:
-            m365dumper = M365DataDumper(args.output_dir, args.reports_dir, msft_graph_app_auth, maindumper.ahsession, config, args.debug, o365_app_auth, token_manager=token_manager)
+            m365dumper = M365DataDumper(args.output_dir, args.reports_dir, msft_graph_app_auth, maindumper.ahsession, config, args.debug, o365_app_auth, token_manager=token_manager, force_repull=force_repull)
             m365 = True
         if 'entraid' in init_sections:
-            entraiddumper = EntraIdDataDumper(args.output_dir, args.reports_dir, msft_graph_app_auth, maindumper.ahsession, config, args.debug, token_manager=token_manager)
+            entraiddumper = EntraIdDataDumper(args.output_dir, args.reports_dir, msft_graph_app_auth, maindumper.ahsession, config, args.debug, token_manager=token_manager, force_repull=force_repull)
             entraid = True
         if 'azure' in init_sections:
-            azure_dumper = AzureDataDumper(args.output_dir, args.reports_dir, maindumper.ahsession, mgmt_app_auth, config, auth_un_pw, loganalytics_app_auth, args.debug, token_manager=token_manager)
+            azure_dumper = AzureDataDumper(args.output_dir, args.reports_dir, maindumper.ahsession, mgmt_app_auth, config, auth_un_pw, loganalytics_app_auth, args.debug, token_manager=token_manager, force_repull=force_repull)
             azure = True
         if 'mde' in init_sections:
             portal_auth = auth.get('portal_auth')
-            mdedumper = MDEDataDumper(args.output_dir, args.reports_dir, msft_security_center_auth, msft_security_auth, maindumper.ahsession, config, args.debug, token_manager=token_manager, portal_auth=portal_auth)
+            mdedumper = MDEDataDumper(args.output_dir, args.reports_dir, msft_security_center_auth, msft_security_auth, maindumper.ahsession, config, args.debug, token_manager=token_manager, portal_auth=portal_auth, force_repull=force_repull)
             mde = True
 
-    pm = init_progress_manager(enabled=not args.debug)
+    progress_file = os.path.join(args.output_dir, '.progress.json')
+    pm = init_progress_manager(enabled=not args.debug, progress_file=progress_file)
 
     async with maindumper.ahsession as ahsession:
         tasks = []
@@ -235,6 +237,7 @@ def honk(authfile=".ugt_auth",
          entraid=False,
          m365=False,
          mde=False,
+         force_repull=False,
          encryption_pw=None,
          # [config] overrides
          tenant=None,
@@ -272,6 +275,7 @@ def honk(authfile=".ugt_auth",
         entraid: Set all of the Entra ID calls to true
         m365: Set all of the M365 calls to true
         mde: Set all of the MDE calls to true
+        force_repull: Ignore save states for snapshot (non-time-based) dumpers and re-pull all data
         encryption_pw: Password for the auth file encryption. SHOULD ONLY BE USED WITH AUTOHONK
         tenant: Override tenant ID from .conf
         gcc: Override GCC setting (true/false)
@@ -331,6 +335,7 @@ def autohonk(authfile=".ugt_auth",
          entraid=False,
          m365=False,
          mde=False,
+         force_repull=False,
          insecure=False,
          **kwargs):
     """
@@ -378,6 +383,7 @@ def autohonk(authfile=".ugt_auth",
         entraid=entraid,
         m365=m365,
         mde=mde,
+        force_repull=force_repull,
         encryption_pw=encryption_pw,
         **kwargs,
     )

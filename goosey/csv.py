@@ -2,7 +2,9 @@
 # -*- coding: utf-8 -*-
 
 """Untitled Goose Tool: Csv!
-This module converts GUIDs to human readable text.
+Post-processing module that replaces GUIDs in output JSON/JSONL files with human-readable
+display names. Builds lookup tables from collected reference files (users.json, groups.json,
+applications.json, etc.) and performs bulk find-and-replace across all output files.
 """
 
 import warnings

@@ -18,6 +18,7 @@ Two auth tokens are used:
 from datetime import datetime, timedelta
 import itertools
 from goosey.datadumper import DataDumper
+from goosey.progress import get_progress_manager
 from goosey.utils import *
 import pytz
 
@@ -34,8 +35,8 @@ class MDEDataDumper(DataDumper):
     - 'machine': Queries each table per-machine, creating separate output dirs per device.
     """
 
-    def __init__(self, output_dir, reports_dir, app_auth, app_auth2, session, config, debug, token_manager=None, portal_auth=None):
-        super().__init__(f'{output_dir}{os.path.sep}mde', reports_dir, app_auth, session, debug, token_manager=token_manager, endpoint_key="securitycenter_api")
+    def __init__(self, output_dir, reports_dir, app_auth, app_auth2, session, config, debug, token_manager=None, portal_auth=None, force_repull=False):
+        super().__init__(f'{output_dir}{os.path.sep}mde', reports_dir, app_auth, session, debug, token_manager=token_manager, endpoint_key="securitycenter_api", force_repull=force_repull)
         self.app_auth2 = app_auth2  # security_api token for M365 Defender advanced hunting
         self.portal_auth = portal_auth  # Optional portal session cookies for timeline APIs
         self.failurefile = os.path.join(reports_dir, '_no_results.json')
@@ -57,49 +58,73 @@ class MDEDataDumper(DataDumper):
         """
         Dump machines with mde
         """
+        if self.check_savestate("machines"):
+            return
         await helper_single_object("api/machines", self.call_object, self.failurefile)
+        self.write_savestate("machines")
 
     async def dump_alerts(self) -> None:
         """
         Dump alerts
         """
+        if self.check_savestate("alerts"):
+            return
         await helper_single_object("api/alerts", self.call_object, self.failurefile)
+        self.write_savestate("alerts")
 
     async def dump_indicators(self) -> None:
         """
         Dump indicators
         """
+        if self.check_savestate("indicators"):
+            return
         await helper_single_object("api/indicators", self.call_object, self.failurefile)
+        self.write_savestate("indicators")
 
     async def dump_investigations(self) -> None:
         """
         Dump investigations
         """
+        if self.check_savestate("investigations"):
+            return
         await helper_single_object("api/investigations", self.call_object, self.failurefile)
+        self.write_savestate("investigations")
 
     async def dump_library_files(self) -> None:
         """
         Dump library files
         """
+        if self.check_savestate("library_files"):
+            return
         await helper_single_object("api/libraryfiles", self.call_object, self.failurefile)
+        self.write_savestate("library_files")
 
     async def dump_machine_vulns(self) -> None:
         """
         Dump known machine vulnerabilities
         """
+        if self.check_savestate("machine_vulns"):
+            return
         await helper_single_object("api/vulnerabilities/machinesVulnerabilities", self.call_object, self.failurefile)
+        self.write_savestate("machine_vulns")
 
     async def dump_software(self) -> None:
         """
         Dump known installed software
         """
+        if self.check_savestate("software"):
+            return
         await helper_single_object("api/Software", self.call_object, self.failurefile)
+        self.write_savestate("software")
 
     async def dump_recommendations(self) -> None:
         """
         Dump mde recommendations
         """
+        if self.check_savestate("recommendations"):
+            return
         await helper_single_object("api/recommendations", self.call_object, self.failurefile)
+        self.write_savestate("recommendations")
 
 
     async def check_machines(self):
@@ -135,25 +160,52 @@ class MDEDataDumper(DataDumper):
 
         tables = ['AlertInfo', 'AlertEvidence']
 
-        tasks = []
+        # Collect table info for shared progress bar
+        table_tasks = []
         for table in tables:
-            # Set the output directory for the mde table logs
             mde_log_dir = os.path.join(self.output_dir, table)
             base_query = table
-
             check_output_dir(mde_log_dir, self.logger)
-
             statefile = os.path.join(mde_log_dir, f".{table}.savestate")
             outfile = os.path.join(mde_log_dir, f"{table}.json")
             saved_end = load_state(statefile)
+            table_start = start
             if saved_end:
-                start = max(saved_end, start)
-            # Use asyncio to use asyncronous coroutines to help ensure we get data before it rolls off
-            self.logger.debug(f"Generating table dump task for table: {table}, start: {start}, end: {end}")
+                table_start = max(saved_end, table_start)
+            self.logger.debug(f"Generating table dump task for table: {table}, start: {table_start}, end: {end}")
+            table_tasks.append((base_query, table_start, end, statefile, outfile))
+
+        if not table_tasks:
+            return
+
+        # Single time-based progress bar across all tables
+        pm = get_progress_manager()
+        table_hours = [max(int((te - ts).total_seconds()) // 3600, 1) for _, ts, te, _, _ in table_tasks]
+        total_hours = sum(table_hours)
+        bar = None
+        bar_name = "mde_alerts_incidents"
+        if pm:
+            bar = pm.create_time_bar(bar_name, total_hours, desc=f"{'mde_alerts_incidents':<35}", unit='hr')
+            if bar:
+                bar.bar_format = "{desc} |{bar}| {percentage:3.0f}% | {n_fmt}/{total_fmt} hrs | elapsed {elapsed}"
+        mde_progress = {"bar": bar, "pm": pm, "bar_name": bar_name, "hours_done": 0, "total_hours": total_hours}
+
+        tasks = []
+        for i, (bq, ts, te, sf, of) in enumerate(table_tasks):
             caller_name = asyncio.current_task().get_name()
-            tasks.append(asyncio.create_task(self._dump_table(base_query, start, end, path="api/advancedhunting/run", statefile=statefile, outfile=outfile),name=f"{caller_name}_{table}"))
+            tasks.append(asyncio.create_task(
+                self._dump_table(bq, ts, te, path="api/advancedhunting/run", statefile=sf, outfile=of,
+                                 shared_progress=mde_progress, table_total_hours=table_hours[i]),
+                name=f"{caller_name}_{bq}"))
 
         await asyncio.gather(*tasks)
+        if bar:
+            remaining = total_hours - mde_progress["hours_done"]
+            if remaining > 0:
+                bar.update(remaining)
+        if pm:
+            pm.complete_task(bar_name)
+    dump_advanced_hunting_alerts_incidents._manages_own_progress = True
 
     async def dump_advanced_hunting_query(self) -> None:
         """Collect MDE advanced hunting data for device telemetry tables.
@@ -192,9 +244,12 @@ class MDEDataDumper(DataDumper):
             machine_mode = True
             machine_table_list = list(itertools.product(machine_ids, tables))
 
-        tasks = []
+        # Convert to list so we can count total tasks for the progress bar
+        machine_table_list = list(machine_table_list)
+
+        # Collect table info for shared progress bar
+        table_tasks = []
         for machine_id, table in machine_table_list:
-            # Set the output directory for the mde table logs
             mde_log_dir = os.path.join(self.output_dir, table)
             machine_name = str(mapOfIds.get(machine_id, ""))
             base_query = table
@@ -206,13 +261,42 @@ class MDEDataDumper(DataDumper):
             statefile = os.path.join(mde_log_dir, f".{table}_{machine_id}.savestate")
             outfile = os.path.join(mde_log_dir, f"{table}_{machine_id}.json")
             saved_end = load_state(statefile)
+            table_start = start
             if saved_end:
-                start = max(saved_end, start)
-            # Use asyncio to use asyncronous coroutines to help ensure we get data before it rolls off
-            self.logger.debug(f"Generating table dump task for table: {table}, machine: {machine_name}, start: {start}, end: {end}")
+                table_start = max(saved_end, table_start)
+            self.logger.debug(f"Generating table dump task for table: {table}, machine: {machine_name}, start: {table_start}, end: {end}")
+            table_tasks.append((base_query, table_start, end, statefile, outfile, table))
+
+        if not table_tasks:
+            return
+
+        # Single time-based progress bar across all tables
+        pm = get_progress_manager()
+        table_hours = [max(int((te - ts).total_seconds()) // 3600, 1) for _, ts, te, _, _, _ in table_tasks]
+        total_hours = sum(table_hours)
+        bar = None
+        bar_name = "mde_adv_hunting"
+        if pm:
+            bar = pm.create_time_bar(bar_name, total_hours, desc=f"{'mde_adv_hunting':<35}", unit='hr')
+            if bar:
+                bar.bar_format = "{desc} |{bar}| {percentage:3.0f}% | {n_fmt}/{total_fmt} hrs | elapsed {elapsed}"
+        mde_progress = {"bar": bar, "pm": pm, "bar_name": bar_name, "hours_done": 0, "total_hours": total_hours}
+
+        tasks = []
+        for i, (bq, ts, te, sf, of, tname) in enumerate(table_tasks):
             caller_name = asyncio.current_task().get_name()
-            tasks.append(asyncio.create_task(self._dump_table(base_query, start, end, path="api/advancedqueries/run", statefile=statefile, outfile=outfile), name=f"{caller_name}_{table}"))
+            tasks.append(asyncio.create_task(
+                self._dump_table(bq, ts, te, path="api/advancedqueries/run", statefile=sf, outfile=of,
+                                 shared_progress=mde_progress, table_total_hours=table_hours[i]),
+                name=f"{caller_name}_{tname}"))
         await asyncio.gather(*tasks)
+        if bar:
+            remaining = total_hours - mde_progress["hours_done"]
+            if remaining > 0:
+                bar.update(remaining)
+        if pm:
+            pm.complete_task(bar_name)
+    dump_advanced_hunting_query._manages_own_progress = True
 
     async def dump_advanced_identity_hunting_query(self) -> None:
         """Collect identity-related tables from M365 Defender advanced hunting.
@@ -238,25 +322,52 @@ class MDEDataDumper(DataDumper):
 
         id_tables = ['IdentityDirectoryEvents', 'IdentityLogonEvents', 'IdentityQueryEvents']
 
-        tasks = []
+        # Collect table info for shared progress bar
+        table_tasks = []
         for table in id_tables:
-            # Set the output directory for the mde table logs
             mde_log_dir = os.path.join(self.output_dir, table)
             base_query = table
-
             check_output_dir(mde_log_dir, self.logger)
-
             statefile = os.path.join(mde_log_dir, f".{table}.savestate")
             outfile = os.path.join(mde_log_dir, f"{table}.json")
             saved_end = load_state(statefile)
+            table_start = start
             if saved_end:
-                start = max(saved_end, start)
-            # Use asyncio to use asyncronous coroutines to help ensure we get data before it rolls off
-            self.logger.debug(f"Generating table dump task for table: {table}, start: {start}, end: {end}")
+                table_start = max(saved_end, table_start)
+            self.logger.debug(f"Generating table dump task for table: {table}, start: {table_start}, end: {end}")
+            table_tasks.append((base_query, table_start, end, statefile, outfile))
+
+        if not table_tasks:
+            return
+
+        # Single time-based progress bar across all tables
+        pm = get_progress_manager()
+        table_hours = [max(int((te - ts).total_seconds()) // 3600, 1) for _, ts, te, _, _ in table_tasks]
+        total_hours = sum(table_hours)
+        bar = None
+        bar_name = "mde_identity_hunting"
+        if pm:
+            bar = pm.create_time_bar(bar_name, total_hours, desc=f"{'mde_identity_hunting':<35}", unit='hr')
+            if bar:
+                bar.bar_format = "{desc} |{bar}| {percentage:3.0f}% | {n_fmt}/{total_fmt} hrs | elapsed {elapsed}"
+        mde_progress = {"bar": bar, "pm": pm, "bar_name": bar_name, "hours_done": 0, "total_hours": total_hours}
+
+        tasks = []
+        for i, (bq, ts, te, sf, of) in enumerate(table_tasks):
             caller_name = asyncio.current_task().get_name()
-            tasks.append(asyncio.create_task(self._dump_table(base_query, start, end, path="api/advancedhunting/run", statefile=statefile, outfile=outfile),name=f"{caller_name}_{table}"))
+            tasks.append(asyncio.create_task(
+                self._dump_table(bq, ts, te, path="api/advancedhunting/run", statefile=sf, outfile=of,
+                                 shared_progress=mde_progress, table_total_hours=table_hours[i]),
+                name=f"{caller_name}_{bq}"))
 
         await asyncio.gather(*tasks)
+        if bar:
+            remaining = total_hours - mde_progress["hours_done"]
+            if remaining > 0:
+                bar.update(remaining)
+        if pm:
+            pm.complete_task(bar_name)
+    dump_advanced_identity_hunting_query._manages_own_progress = True
 
     async def run_mde_query(self, query, start, end, bounds, path='api/advancedqueries/run', summarize=False):
         """Execute a KQL query against MDE's advanced hunting API.
@@ -369,7 +480,7 @@ class MDEDataDumper(DataDumper):
         return result, err, end, bounds
 
 
-    async def _dump_table(self, base_query, start, end, path, statefile, outfile, retries=3):
+    async def _dump_table(self, base_query, start, end, path, statefile, outfile, retries=3, on_complete=None, shared_progress=None, table_total_hours=None):
         """Query an MDE/M365 Defender table and collect all logs for a time range.
 
         Uses a two-phase approach:
@@ -389,6 +500,9 @@ class MDEDataDumper(DataDumper):
             statefile: Path to save checkpoint after each successful time slice.
             outfile: Path to append collected log records.
             retries: Max consecutive errors before abandoning.
+            on_complete: Legacy callback invoked when table finishes.
+            shared_progress: Shared dict with 'bar', 'hours_done' for time-based progress.
+            table_total_hours: This table's share of the total hours in the progress bar.
         """
         totalResultCount = 0
         totalResultEnd = start
@@ -396,6 +510,36 @@ class MDEDataDumper(DataDumper):
         origStart = start
         finalEnd = end
         tries = 0
+
+        # Track this table's contribution to the shared progress bar
+        my_total_hours = table_total_hours or 1
+        my_hours_reported = 0
+
+        def _update_progress(covered_end):
+            """Update the shared progress bar based on time covered."""
+            nonlocal my_hours_reported
+            if not shared_progress or not shared_progress.get("bar"):
+                return
+            covered_secs = max((covered_end - origStart).total_seconds(), 0)
+            total_secs = max((finalEnd - origStart).total_seconds(), 1)
+            fraction = min(covered_secs / total_secs, 1.0)
+            my_covered = int(fraction * my_total_hours)
+            delta = my_covered - my_hours_reported
+            if delta > 0:
+                shared_progress["bar"].update(delta)
+                shared_progress["hours_done"] += delta
+                my_hours_reported = my_covered
+
+        def _complete_progress():
+            """Flush remaining hours for this table to the shared bar."""
+            nonlocal my_hours_reported
+            if not shared_progress or not shared_progress.get("bar"):
+                return
+            delta = my_total_hours - my_hours_reported
+            if delta > 0:
+                shared_progress["bar"].update(delta)
+                shared_progress["hours_done"] += delta
+                my_hours_reported = my_total_hours
         # Sentinel record: prevents empty-bounds edge cases. Placed at the end of
         # the time range so the loop terminates naturally when all real bounds are consumed.
         final_record = {"count": None,
@@ -417,11 +561,15 @@ class MDEDataDumper(DataDumper):
                 if origStart == start and finalEnd == end:
                     self.logger.debug(f"No logs for {base_query} from {start} to {end}")
                     save_state(statefile, end)
+                    _complete_progress()
+                    if on_complete:
+                        on_complete()
                     return
                 # Otherwise it just means this lower time segment has no logs and we remove it and continue
                 start = end
                 end = finalEnd
                 bounds = [final_record]
+                _update_progress(start)
                 continue
             elif summary != None and summary[0]["Count"] > 0:
                 tries = 0
@@ -453,6 +601,7 @@ class MDEDataDumper(DataDumper):
                 if summary[0]["Count"] == 0:
                     end = bounds[0]["end"]
                     start = bounds[0]["start"]
+                    _update_progress(start)
                     continue
 
             results, err, end, bounds = await self.run_mde_query(base_query, start, end, bounds, path=path)
@@ -469,6 +618,7 @@ class MDEDataDumper(DataDumper):
                         f.write(json.dumps(x) + '\n')
 
                 save_state(statefile, end)
+                _update_progress(end)
 
                 tries = 0
                 end = bounds[0]["end"]
@@ -480,6 +630,10 @@ class MDEDataDumper(DataDumper):
                 totalSavedResults += len(results)
                 self.logger.debug(f"Total results {totalSavedResults}/{totalResultCount}")
                 continue
+
+        _complete_progress()
+        if on_complete:
+            on_complete()
 
     def _build_portal_headers(self, extra_headers=None):
         """Build request headers for portal proxy API calls.
@@ -745,6 +899,14 @@ class MDEDataDumper(DataDumper):
             if self.date_end:
                 end_date = datetime.strptime(self.date_end, "%Y-%m-%d")
 
+        # Progress bar: track machines completed
+        pm = get_progress_manager()
+        pbar = None
+        if pm and machine_ids:
+            pbar = pm.create_time_bar("mde_machine_timeline", len(machine_ids), desc="mde_machine_timeline", unit="machine")
+            if pbar:
+                pbar.bar_format = "{desc} |{bar}| {percentage:3.0f}% | machine {n_fmt}/{total_fmt} | elapsed {elapsed}"
+
         async def _fetch_timeline(machine_id):
             hostname = id_to_name.get(machine_id, 'unknown')
             safe_hostname = hostname.replace('/', '_').replace('\\', '_')
@@ -753,6 +915,8 @@ class MDEDataDumper(DataDumper):
 
             if os.path.isfile(statefile) and os.path.isfile(outfile):
                 self.logger.debug(f"Skipping timeline for {hostname} ({machine_id}) - already collected.")
+                if pbar:
+                    pbar.update(1)
                 return
 
             # Chunk into 2-day windows for parallel throughput (API max is 7 days per initial request)
@@ -782,12 +946,15 @@ class MDEDataDumper(DataDumper):
 
             if total_count > 0:
                 self.logger.debug(f"Collected {total_count} timeline events for {hostname} ({machine_id})")
+            if pbar:
+                pbar.update(1)
 
         tasks = [asyncio.create_task(_fetch_timeline(mid), name=f"machine_timeline_{mid}") for mid in machine_ids]
         if tasks:
             self.logger.info(f"Collecting timeline for {len(tasks)} machines...")
             await asyncio.gather(*tasks)
             self.logger.info("Machine timeline collection complete.")
+    dump_machine_timeline._manages_own_progress = True
 
     async def dump_identity_timeline(self) -> None:
         """Collect identity timelines from the M365 Defender portal API.
@@ -875,6 +1042,14 @@ class MDEDataDumper(DataDumper):
             if self.date_end:
                 end_date = datetime.strptime(self.date_end, "%Y-%m-%d")
 
+        # Progress bar: track identities completed
+        pm = get_progress_manager()
+        pbar = None
+        if pm and users:
+            pbar = pm.create_time_bar("mde_identity_timeline", len(users), desc="mde_identity_timeline", unit="identity")
+            if pbar:
+                pbar.bar_format = "{desc} |{bar}| {percentage:3.0f}% | identity {n_fmt}/{total_fmt} | elapsed {elapsed}"
+
         async def _fetch_identity(user):
             user_id = user.get('accountId', user.get('id', 'unknown'))
             user_name = user.get('displayName', user.get('accountName', 'unknown'))
@@ -884,6 +1059,8 @@ class MDEDataDumper(DataDumper):
 
             if os.path.isfile(statefile) and os.path.isfile(outfile):
                 self.logger.debug(f"Skipping identity timeline for {user_name} ({user_id}) - already collected.")
+                if pbar:
+                    pbar.update(1)
                 return
 
             timeline_url = f"{portal_base}/apiproxy/mdi/identity/userapiservice/timeline/mtp"
@@ -934,12 +1111,15 @@ class MDEDataDumper(DataDumper):
 
             if total_count > 0:
                 self.logger.debug(f"Collected {total_count} identity events for {user_name} ({user_id})")
+            if pbar:
+                pbar.update(1)
 
         tasks = [asyncio.create_task(_fetch_identity(u), name=f"identity_timeline_{u.get('accountId', 'unknown')}") for u in users]
         if tasks:
             self.logger.info(f"Collecting identity timeline for {len(tasks)} users...")
             await asyncio.gather(*tasks)
             self.logger.info("Identity timeline collection complete.")
+    dump_identity_timeline._manages_own_progress = True
 
     def _find_min_timestamp_in_file(self, filepath, last_n_lines=1000):
         """Find the minimum timestamp in the last N lines of a JSONL file.

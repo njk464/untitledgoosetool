@@ -2,7 +2,18 @@
 # -*- coding: utf-8 -*-
 
 """Untitled Goose Tool: entra_id_datadumper!
-This module has all the telemetry pulls for Entra ID, formerly known as Azure AD.
+This module collects Entra ID (formerly Azure AD) telemetry via the Microsoft Graph API (beta).
+
+Data collected includes:
+- Sign-in logs (interactive/ADFS, non-interactive, service principal, managed identity)
+- Audit logs (directory changes)
+- Provisioning logs
+- Configuration objects (apps, groups, users, roles, policies, devices, etc.)
+- Risk detections and risky objects (requires Entra ID P1/P2 licenses)
+- Security alerts and secure scores
+
+Most methods use helper_single_object for simple endpoints, with save state support
+for sign-in and audit log collection to enable resumable incremental pulls.
 """
 
 import asyncio
@@ -11,12 +22,14 @@ import os
 
 from datetime import datetime, timedelta
 from goosey.datadumper import DataDumper
+from goosey.progress import get_progress_manager
 from goosey.utils import *
 
 class EntraIdDataDumper(DataDumper):
+    """Collects Entra ID / Azure AD data via the Microsoft Graph API beta endpoint."""
 
-    def __init__(self, output_dir, reports_dir, app_auth, session, config, debug, token_manager=None):
-        super().__init__(f'{output_dir}{os.path.sep}entraid', reports_dir, app_auth, session, debug, token_manager=token_manager, endpoint_key="graph_api")
+    def __init__(self, output_dir, reports_dir, app_auth, session, config, debug, token_manager=None, force_repull=False):
+        super().__init__(f'{output_dir}{os.path.sep}entraid', reports_dir, app_auth, session, debug, token_manager=token_manager, endpoint_key="graph_api", force_repull=force_repull)
         self.logger = setup_logger(__name__, debug)
         self.gcc = config_get(config, 'config', 'gcc', self.logger).lower() == "true"
         self.gcc_high = config_get(config, 'config', 'gcc_high', self.logger).lower() == "true"
@@ -32,24 +45,28 @@ class EntraIdDataDumper(DataDumper):
         Dump interactive (adfs) sign in logs
         """
         return await self._dump_signins('adfs')
+    dump_signins_adfs._manages_own_progress = True
 
     async def dump_signins_rt(self):
         """
         Dump non-interactive (rt) sign in logs
         """
         return await self._dump_signins('rt')
+    dump_signins_rt._manages_own_progress = True
 
     async def dump_signins_sp(self):
         """
         Dump service principal (sp) signin logs
         """
         return await self._dump_signins('sp')
+    dump_signins_sp._manages_own_progress = True
 
     async def dump_signins_msi(self):
         """
         Dump managed identity (msi) sign in logs
         """
         return await self._dump_signins('msi')
+    dump_signins_msi._manages_own_progress = True
 
     @requires_auth
     async def _dump_signins(self, source: str) -> None:
@@ -95,6 +112,14 @@ class EntraIdDataDumper(DataDumper):
             start = '%sT00:00:00.000000Z' % ((datetime.now() - timedelta(days=29)).strftime("%Y-%m-%d"))
             self.logger.info('Getting signin logs for source %s...' % (source))
             end_date = '%sT00:00:00.000000Z' % (datetime.now().strftime("%Y-%m-%d"))
+
+        # Calculate total days for progress bar
+        total_days = (dateutil.parser.parse(end_date) - dateutil.parser.parse(start)).days
+        pm = get_progress_manager()
+        pbar = None
+        if pm and total_days > 0:
+            task_name = f"entraid_signins_{source}"
+            pbar = pm.create_time_bar(task_name, total_days, desc=f"{'entraid_signins_' + source:<35}")
 
         while dateutil.parser.parse(start) < dateutil.parser.parse(end_date):
             self.ensure_token()
@@ -153,6 +178,8 @@ class EntraIdDataDumper(DataDumper):
             if os.path.isfile(outfile) and os.stat(outfile).st_size == 0:
                 os.remove(outfile)
             start = '%sT00:00:00.000000Z' % ((datetime.strptime(start, ("%Y-%m-%dT%H:%M:%S.%fZ")).date() + timedelta(days=1)).strftime("%Y-%m-%d"))
+            if pbar:
+                pbar.update(1)
 
         self.logger.info('Finished dumping signin logs for source: {}'.format(source))
 
@@ -207,6 +234,12 @@ class EntraIdDataDumper(DataDumper):
 
 
         self.logger.info('Getting Entra ID audit logs...')
+        total_days = (dateutil.parser.parse(end_date) - dateutil.parser.parse(start)).days
+        pm = get_progress_manager()
+        pbar = None
+        if pm and total_days > 0:
+            pbar = pm.create_time_bar("entraid_audit", total_days, desc=f"{'entraid_audit':<35}")
+
         while start < end_date:
             self.ensure_token()
             retries = 5
@@ -255,6 +288,8 @@ class EntraIdDataDumper(DataDumper):
                             f.write(end_time)
 
                         if success:
+                            if pbar:
+                                pbar.update(1)
                             break
 
 
@@ -273,6 +308,7 @@ class EntraIdDataDumper(DataDumper):
 
 
         self.logger.info('Finished dumping Entra ID audit logs.')
+    dump_entraid_audit._manages_own_progress = True
 
     @requires_auth
     async def dump_entraid_provisioning(self) -> None:
@@ -282,6 +318,8 @@ class EntraIdDataDumper(DataDumper):
         :return: None
         :rtype: None
         """
+        if self.check_savestate("entraid_provisioning"):
+            return
         url = self.graph_url + "/beta/auditLogs/provisioning"
 
         self.logger.info('Getting Entra ID provisioning logs...')
@@ -310,11 +348,20 @@ class EntraIdDataDumper(DataDumper):
                 await get_nextlink(nexturl, outfile, self.ahsession, self.logger, self.app_auth)
 
         self.logger.info('Finished dumping Entra ID provisioning logs.')
+        self.write_savestate("entraid_provisioning")
 
     def get_url(self):
         return self.graph_url + "/beta/"
 
     async def helper_multiple_object(self, parent, child, output_dir, identifier='id', caller=""):
+        """Fetch a parent collection, then for each parent item, fetch its child collection.
+
+        For example: parent='users', child='appRoleAssignments' fetches all users, then
+        for each user fetches their app role assignments. Results are enriched with the
+        parent object data and written as JSONL.
+
+        Handles pagination via @odata.nextLink for both parent and child collections.
+        """
         url_parent = self.get_url()
 
         current_task = asyncio.current_task()
@@ -461,6 +508,8 @@ class EntraIdDataDumper(DataDumper):
         """
         Dumps Entra ID configuration files
         """
+        if self.check_savestate("entraid_configs"):
+            return
         sub_dir = os.path.join(self.output_dir, 'entraid_configs')
         check_output_dir(sub_dir, self.logger)
 
@@ -545,11 +594,14 @@ class EntraIdDataDumper(DataDumper):
             self.helper_multiple_object(parent='servicePrincipals', child='tokenLifetimePolicies', output_dir=sub_dir, caller=caller_name),
             self.helper_multiple_object(parent='servicePrincipals', child='delegatedPermissionClassifications', output_dir=sub_dir, caller=caller_name)
         )
+        self.write_savestate("entraid_configs")
 
     async def dump_risk_detections(self) -> None:
         """
         Dumps risk detections from identity protection. Requires a minimum of Microsoft Entra ID P1 license and Microsoft Entra Workload ID premium license for full results.
         """
+        if self.check_savestate("risk_detections"):
+            return
         sub_dir = os.path.join(self.output_dir, 'entraid_riskdetections')
         check_output_dir(sub_dir, self.logger)
         caller_name = asyncio.current_task().get_name()
@@ -559,11 +611,14 @@ class EntraIdDataDumper(DataDumper):
             helper_single_object('identityProtection/riskDetections', ri_call_object, self.failurefile, caller=caller_name),
             helper_single_object('identityProtection/servicePrincipalRiskDetections', ri_call_object, self.failurefile, caller=caller_name)
         )
+        self.write_savestate("risk_detections")
 
     async def dump_risky_objects(self) -> None:
         """
         Dumps risky users and service principal information. Requires a minimum of Microsoft Entra ID P2 license and Microsoft Entra Workload ID premium license for full results.
         """
+        if self.check_savestate("risky_objects"):
+            return
         sub_dir = os.path.join(self.output_dir, 'entraid_riskyobjects')
         check_output_dir(sub_dir, self.logger)
         caller_name = asyncio.current_task().get_name()
@@ -575,11 +630,14 @@ class EntraIdDataDumper(DataDumper):
             self.helper_multiple_object(parent='riskyUsers', child='history', output_dir=sub_dir, caller=caller_name),
             self.helper_multiple_object(parent='identityProtection/riskyServicePrincipals', child='history', output_dir=sub_dir, caller=caller_name)
         )
+        self.write_savestate("risky_objects")
 
     async def dump_security(self) -> None:
         """
         Dump security actions, alerts, and scores
         """
+        if self.check_savestate("security"):
+            return
         sub_dir = os.path.join(self.output_dir, 'entraid_security')
         check_output_dir(sub_dir, self.logger)
         caller_name = asyncio.current_task().get_name()
@@ -590,3 +648,4 @@ class EntraIdDataDumper(DataDumper):
             helper_single_object('security/alerts', sec_call_object, self.failurefile, caller=caller_name),
             helper_single_object('security/secureScores', sec_call_object, self.failurefile, caller=caller_name)
         )
+        self.write_savestate("security")

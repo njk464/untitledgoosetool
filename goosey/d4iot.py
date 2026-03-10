@@ -78,7 +78,7 @@ async def run(args, config, auth, auth_un_pw=None):
     if args.dry_run:
         d4iot_dumper = maindumper
     else:
-        d4iot_dumper = DefenderIoTDumper(args.output_dir, args.reports_dir, maindumper.ahsession, csrftoken, sessionid, config, auth_un_pw, args.debug)
+        d4iot_dumper = DefenderIoTDumper(args.output_dir, args.reports_dir, maindumper.ahsession, csrftoken, sessionid, config, auth_un_pw, args.debug, force_repull=getattr(args, 'force_repull', False))
 
     async with maindumper.ahsession as ahsession:
         tasks = []
@@ -109,7 +109,8 @@ def d4iot(authfile=".d4iot_auth",
           output_dir="output",
           reports_dir="reports",
           debug=False,
-          dry_run=False):
+          dry_run=False,
+          force_repull=False):
     """
     Gather d4iot Information
 

@@ -2,6 +2,17 @@
 # -*- coding: utf-8 -*-
 
 """Untitled Goose Tool: Utils!
+
+Shared utility functions used across all modules:
+- Logging setup with colored console output and file handlers (debug.log, error.log)
+- API endpoint URL configuration for commercial, GCC, and GCC High clouds
+- Config file parsing helpers
+- Graph API pagination (get_nextlink) and single-object retrieval (helper_single_object)
+- KQL query execution for Azure Log Analytics workspaces (run_kql_query)
+- Time-range bounds tracking for incremental collection (insert_bounds_record, find_time_gaps)
+- Save state management for resumable data collection (load_state, save_state)
+- Auth file encryption/decryption via AES (read_auth, write_auth)
+- File locking for cross-process safety (Lock class)
 """
 
 import asyncio
@@ -244,6 +255,7 @@ def build_date_tuples(chunk_size=26, start_date=None, end_date=None):
     return ret[::-1]
 
 def findkeys(node, kv):
+    """Recursively search nested dicts/lists and yield all values for the given key."""
     if isinstance(node, list):
         for i in node:
             for x in findkeys(i, kv):
@@ -308,6 +320,12 @@ def check_output_dir(output_dir, logger):
         sys.exit(1)
 
 async def get_nextlink(url, outfile, session, logger, auth):
+    """Follow @odata.nextLink pagination to retrieve all pages of a Graph API response.
+
+    Microsoft Graph returns paginated results with an @odata.nextLink URL for the next page.
+    This function follows the chain until no more pages remain, appending all results to outfile.
+    Handles 429 rate limiting with sleep, 401 auth errors by returning, and general errors with retries.
+    """
     retries = DEFAULT_RETRIES
     while url:
         try:
@@ -362,14 +380,30 @@ async def get_nextlink(url, outfile, session, logger, auth):
                     logger.error('Error on nextLink retrieval {}: {}'.format(skiptoken, str(e)))
 
 async def run_kql_query(query, start, end, bounds, url, app_auth, logger, session, threshold=LAW_QUERY_THRESHOLD, summarize=False):
+    """Execute a KQL query against an Azure Log Analytics workspace.
+
+    Similar to run_mde_query but targets Log Analytics (api.loganalytics.io) instead of MDE.
+    Appends TimeGenerated filters and optional summarize clause. Handles the same error
+    categories: sleep errors (server issues), slice errors (too much data → halve time range),
+    and auth errors (expired token).
+
+    Args:
+        query: Base KQL query string.
+        start/end: Time range for the TimeGenerated filter.
+        bounds: Time-bound records for tracking search progress.
+        url: Full Log Analytics query API URL.
+        app_auth: Token dict for the Log Analytics API.
+        threshold: Max row count before triggering a time-range split.
+        summarize: If True, appends summarize clause for count/time info only.
+
+    Returns:
+        Tuple of (results_list, error_string, adjusted_end, updated_bounds).
     """
-    Run an advanced query or hunt and return the result
-    """
-    # errors from the query that will cause the dumper to sleep
+    # Server-side issues — sleep and retry
     sleep_errors = ["Server disconnected", "Cannot connect", "WinError 10054"]
-    # errors from the query that will cause the dumper to cut the tim in half
+    # Result too large — halve the time range
     slice_errors = ['exceeded the allowed limits', 'exceeded the allowed result size', 'Rate limit']
-    # Errors in the authentication token
+    # Authentication failures
     auth_errors = ['TokenExpired']
 
 
@@ -518,6 +552,18 @@ def insert_bounds_record(record, bounds):
     return bounds[idx:]
 
 async def helper_single_object(endpoint, params, failurefile=None, retries=5, caller="") -> None:
+        """Fetch a single Graph API endpoint and write all results (with pagination) to a JSONL file.
+
+        This is the workhorse for simple data collection: GET the endpoint, write the 'value'
+        array as one JSON object per line, then follow @odata.nextLink for additional pages.
+
+        Args:
+            endpoint: API path relative to the base URL (e.g. 'users', 'api/machines').
+            params: List of [base_url, auth_dict, logger, output_dir, aiohttp_session].
+            failurefile: Path to log endpoints that returned empty results.
+            retries: Number of retry attempts for transient errors.
+            caller: Parent task name for labeling this task.
+        """
         url, auth, logger, output_dir, session = params[0], params[1], params[2], params[3], params[4]
 
         current_task = asyncio.current_task()
@@ -602,6 +648,10 @@ async def helper_single_object(endpoint, params, failurefile=None, retries=5, ca
         logger.info('Finished dumping %s information.' % (name))
 
 class Lock:
+    """Cross-platform file lock using fcntl (Unix) or msvcrt (Windows).
+
+    Used to prevent concurrent access to shared files (e.g. auth files).
+    """
     def __init__(self, fh):
         self.fh = fh
 
@@ -684,6 +734,7 @@ def get_date_range(config, logger=logging):
     return (date_range, date_start, date_end)
 
 def insert_time(time_range, start, end):
+    """Insert a new [start, end] interval into a sorted list, merging overlaps."""
     if time_range == None:
         time_range = []
     record = {"start": start, "end": end}
@@ -705,6 +756,16 @@ def insert_time(time_range, start, end):
     return new_time_range
 
 def load_state(filepath, is_datetime=True, time_range=False, time_bounds=False):
+    """Load save state from a checkpoint file.
+
+    Supports three formats:
+    - is_datetime=True: Single datetime string (e.g. "2024-01-15T00:00:00").
+    - time_range=True: JSON array of {start, end} time intervals (for completed ranges).
+    - time_bounds=True: JSON array of {start, end, count, done_status} bounds records.
+    - is_datetime=False (no range/bounds): Raw string value (e.g. a mailbox ID).
+
+    Returns None if the file doesn't exist.
+    """
     if os.path.isfile(filepath):
         end = open(filepath, "r").read()
         if is_datetime:
@@ -723,6 +784,12 @@ def load_state(filepath, is_datetime=True, time_range=False, time_bounds=False):
     return None
 
 def save_state(filepath, end, start=None, is_datetime=True, time_range=False, time_bounds=False):
+    """Persist collection progress to a checkpoint file.
+
+    For datetime mode: only saves if the new end is later than the existing checkpoint.
+    For time_range mode: merges the new [start, end] interval with existing ranges.
+    For time_bounds mode: writes the full bounds state as JSON.
+    """
     if not filepath:
         return
     if is_datetime:
@@ -784,6 +851,11 @@ def find_time_gaps(time_range, start, end):
 
 
 def read_auth(filepath: str, logger=logging, encryption_pw=None):
+    """Read an auth/credentials file, decrypting if an AES-encrypted version exists.
+
+    Checks for filepath.aes first (encrypted). If found, decrypts with the password.
+    Falls back to reading the plaintext file if no encrypted version exists.
+    """
     try:
         authString = None
         dir_path = os.path.dirname(os.path.realpath(filepath))
@@ -807,6 +879,11 @@ def read_auth(filepath: str, logger=logging, encryption_pw=None):
     return authString
 
 def write_auth(filepath: str, writestr, logger=logging, encryption_pw=None, insecure=False):
+    """Write auth data to file, encrypting with AES unless in insecure mode.
+
+    In secure mode (default): encrypts to filepath.aes and deletes any plaintext version.
+    In insecure mode: writes plaintext directly (used for testing/development).
+    """
     try:
         if not insecure:
             dir_path = os.path.dirname(os.path.realpath(filepath))

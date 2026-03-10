@@ -23,8 +23,6 @@ import time
 import urllib.parse
 import random
 
-from tqdm import tqdm
-
 from aiohttp.client_exceptions import *
 from datetime import datetime, timedelta
 from goosey.datadumper import DataDumper
@@ -40,8 +38,8 @@ class M365DataDumper(DataDumper):
     - o365_app_auth (outlook_office_api): For Exchange Online AdminAPI PowerShell cmdlets
     """
 
-    def __init__(self, output_dir, reports_dir, app_auth, session, config, debug, o365_app_auth, token_manager=None):
-        super().__init__(f'{output_dir}{os.path.sep}m365', reports_dir, app_auth, session, debug, token_manager=token_manager, endpoint_key="graph_api")
+    def __init__(self, output_dir, reports_dir, app_auth, session, config, debug, o365_app_auth, token_manager=None, force_repull=False):
+        super().__init__(f'{output_dir}{os.path.sep}m365', reports_dir, app_auth, session, debug, token_manager=token_manager, endpoint_key="graph_api", force_repull=force_repull)
         self.logger = setup_logger(__name__, debug)
         self.gcc = config_get(config, 'config', 'gcc', self.logger).lower() == "true"
         self.gcc_high = config_get(config, 'config', 'gcc_high', self.logger).lower() == "true"
@@ -70,7 +68,6 @@ class M365DataDumper(DataDumper):
         self.tenantId = config_get(config, 'config', 'tenant')
         self.ual_tasks = []  # Active concurrent UAL sub-tasks
         self.ual_results_cache = []  # Buffers results when API returns data for wrong time range
-        self.ual_pbar = None
         self.date_range, self.date_start, self.date_end = get_date_range(config, self.logger)
 
         self.call_object = [self.endpoints["graph_api"] + "/beta/", self.app_auth, self.logger, self.output_dir, self.get_session()]
@@ -255,7 +252,9 @@ class M365DataDumper(DataDumper):
         """
         Get EXO config information
         """
-        asyncio.gather(
+        if self.check_savestate("exo_config_info"):
+            return
+        await asyncio.gather(
             self.save_exo_cmdlet("Get-MailboxAuditBypassAssociation", "EXO_MailboxAuditStatus_PowerShell.json", Parameters={"ResultSize": "Unlimited"}),
             self.save_exo_cmdlet("Get-AdminAuditLogConfig", "EXO_AdminAuditLogConfig_PowerShell.json"),
             # Below cmdlet is in the previous powershell script but gives an error here
@@ -265,6 +264,7 @@ class M365DataDumper(DataDumper):
             self.save_exo_cmdlet("Get-TransportRule", "EXO_TransportRules_PowerShell.json"),
             self.save_exo_cmdlet("Get-TransportConfig", "EXO_TransportConfig_PowerShell.json")
         )
+        self.write_savestate("exo_config_info")
 
     async def dump_exo_mobile_devices(self) -> None:
         """
@@ -321,7 +321,10 @@ class M365DataDumper(DataDumper):
         """
         Get all of the applications installed for the organization
         """
+        if self.check_savestate("exo_addins"):
+            return
         await self.save_exo_cmdlet("Get-App", "EXO_AddIns.json", Parameters={"OrganizationApp": "True", "PrivateCatalog": "True"}, remove_fields=["ManifestXml"])
+        self.write_savestate("exo_addins")
 
     @requires_auth
     async def dump_exo_inboxrules(self) -> None:
@@ -548,7 +551,7 @@ class M365DataDumper(DataDumper):
 
         return start, end
 
-    async def _new_ual_timeframe(self, start, end, retries=5, statefile=None, boundsfile=None, session_results=[], sessionId=None, isolated=False, caller=""):
+    async def _new_ual_timeframe(self, start, end, retries=5, statefile=None, boundsfile=None, session_results=[], sessionId=None, isolated=False, caller="", ual_progress=None, range_total_hours=None):
         """Core UAL collection engine: searches a time range and collects all audit logs.
 
         This implements a binary-search approach to handle large log volumes:
@@ -582,6 +585,8 @@ class M365DataDumper(DataDumper):
             sessionId: Pre-existing session ID when continuing an isolated session.
             isolated: True when this is a dedicated sub-task for a single time slice.
             caller: Name of the parent task for labeling sub-tasks.
+            ual_progress: Shared progress dict with 'bar', 'pm', 'bar_name', 'hours_done', 'total_hours'.
+            range_total_hours: This range's share of total hours in the progress bar.
         """
 
         response_count = 0
@@ -591,6 +596,37 @@ class M365DataDumper(DataDumper):
         tries = 0
         total_duplicates = 0
         continuing = False
+
+        # Time-based progress tracking (only for non-isolated parent tasks)
+        orig_start = start
+        my_hours_reported = 0
+
+        def _update_ual_progress(covered_end):
+            """Update the shared UAL time-based progress bar."""
+            nonlocal my_hours_reported
+            if not ual_progress or not ual_progress.get("bar") or isolated:
+                return
+            covered_secs = max((covered_end - orig_start).total_seconds(), 0)
+            total_secs = max((finalEnd - orig_start).total_seconds(), 1)
+            fraction = min(covered_secs / total_secs, 1.0)
+            my_covered = int(fraction * (range_total_hours or 0))
+            delta = my_covered - my_hours_reported
+            if delta > 0:
+                ual_progress["bar"].update(delta)
+                ual_progress["hours_done"] += delta
+                my_hours_reported = my_covered
+
+        def _complete_ual_progress():
+            """Flush remaining hours for this range to the shared bar."""
+            nonlocal my_hours_reported
+            if not ual_progress or not ual_progress.get("bar") or isolated:
+                return
+            delta = (range_total_hours or 0) - my_hours_reported
+            if delta > 0:
+                ual_progress["bar"].update(delta)
+                ual_progress["hours_done"] += delta
+                my_hours_reported = range_total_hours or 0
+
         # continue the session if this is a created a task
         if isolated and sessionId and session_results:
             continuing = True
@@ -827,12 +863,12 @@ class M365DataDumper(DataDumper):
                 elapsed_time = time.perf_counter() - self.ual_seconds
                 rate = int(self.total_ual_logs_saved / elapsed_time * 60 * 60)
                 self.logger.info(f"Saved {len(session_results)} logs. Current rate is {rate} logs/hours")
-                if self.ual_pbar is not None:
-                    self.ual_pbar.update(len(session_results))
-                    self.ual_pbar.set_postfix(rate=f"{rate} logs/hr")
+                if ual_progress and ual_progress.get("bar"):
+                    ual_progress["bar"].set_postfix_str(f"{self.total_ual_logs_saved} logs | {rate} logs/hr")
 
             if new_task_created or data_saved:
                 start = end
+                _update_ual_progress(start)
                 end = finalEnd
                 #self.logger.debug(f"start/end before bounds {start}/{end}")
                 end,_ = self.find_bounds_end_size(start, end)
@@ -840,6 +876,7 @@ class M365DataDumper(DataDumper):
 
         if not isolated:
             await asyncio.gather(*self.ual_tasks)
+        _complete_ual_progress()
 
     async def dump_ual(self):
         """Collect the Unified Audit Log (UAL) via Search-UnifiedAuditLog.
@@ -912,38 +949,47 @@ class M365DataDumper(DataDumper):
         search_time_ranges += find_time_gaps(finished_time_ranges, start, end)
 
         self.logger.debug(search_time_ranges)
+
+        self.total_ual_logs_saved = 0
+        self.ual_seconds = time.perf_counter()
+
+        # Calculate total hours across all time ranges for the progress bar
+        range_hours_list = []
+        for record in search_time_ranges:
+            range_secs = max(int((record["end"] - record["start"]).total_seconds()), 1)
+            range_hours_list.append(max(range_secs // 3600, 1))
+        total_hours = sum(range_hours_list)
+
+        # Create time-based progress bar
+        pm = get_progress_manager()
+        bar = None
+        bar_name = "m365_ual"
+        if pm:
+            bar = pm.create_time_bar(bar_name, total_hours, desc=f"{'Collecting UAL':<35}", unit='hr')
+            if bar:
+                bar.bar_format = "{desc} |{bar}| {percentage:3.0f}% | {n_fmt}/{total_fmt} hrs | elapsed {elapsed} | {postfix}"
+        ual_progress = {"bar": bar, "pm": pm, "bar_name": bar_name, "hours_done": 0, "total_hours": total_hours}
+
         # set the start time according to the save state
         tasks = []
-        for record in search_time_ranges:
+        for i, record in enumerate(search_time_ranges):
             start, end = record["start"], record["end"]
             start = start.replace(microsecond=0)
             end = end.replace(microsecond=0)
             self.logger.info(f"Goosey collecting ual logs from : {start} -> {end}")
             caller_name = asyncio.current_task().get_name()
-            tasks.append(asyncio.create_task(self._new_ual_timeframe(start, end, statefile=statefile, boundsfile=boundsfile, caller=caller_name),name=f"{caller_name}_bounding_{start.isoformat()}_{end.isoformat()}"))
-
-        self.total_ual_logs_saved = 0
-        self.ual_seconds = time.perf_counter()
-
-        # Use progress manager for the UAL bar if available, else fall back to direct tqdm
-        pm = get_progress_manager()
-        if pm and pm.enabled:
-            self.ual_pbar = pm.create_custom_bar(
-                "m365_ual",
-                total=None,
-                unit=" logs",
-                desc="Collecting UAL logs",
-            )
-        else:
-            self.ual_pbar = tqdm(total=None, unit=" logs", desc="Collecting UAL logs", dynamic_ncols=True)
+            tasks.append(asyncio.create_task(self._new_ual_timeframe(start, end, statefile=statefile, boundsfile=boundsfile, caller=caller_name, ual_progress=ual_progress, range_total_hours=range_hours_list[i]),name=f"{caller_name}_bounding_{start.isoformat()}_{end.isoformat()}"))
 
         try:
             await asyncio.gather(*tasks)
         finally:
-            # If managed by progress manager, let pm.close_all() handle it
-            if not (pm and pm.enabled):
-                self.ual_pbar.close()
-            self.ual_pbar = None
+            # Mark the bar complete
+            if bar:
+                remaining = total_hours - ual_progress["hours_done"]
+                if remaining > 0:
+                    bar.update(remaining)
+            if pm:
+                pm.complete_task(bar_name)
         elapsed = time.perf_counter() - self.ual_seconds
         self.logger.info("Goosey executed in {0:0.2f} seconds.".format(elapsed))
 

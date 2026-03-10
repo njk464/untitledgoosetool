@@ -2,7 +2,16 @@
 # -*- coding: utf-8 -*-
 
 """Untitled Goose Tool: d4iot_dumper!
-This module has all the telemetry pulls for Defender for IoT.
+This module collects telemetry from Microsoft Defender for IoT (D4IoT) sensors and
+management consoles.
+
+D4IoT uses a different auth model than other Microsoft cloud APIs:
+- Sensor API: Uses an API token (Bearer auth header)
+- Sensor PCAP downloads: Uses cookie-based auth (CSRF token + session cookie from login)
+- Management console API: Uses a separate API token
+
+Data collected: devices, alerts, connections, CVEs, events, vulnerabilities (device,
+security, operational), and PCAP files from alerts.
 """
 import getpass
 import json
@@ -12,8 +21,14 @@ from goosey.datadumper import DataDumper
 from goosey.utils import *
 
 class DefenderIoTDumper(DataDumper):
-    def __init__(self, output_dir, reports_dir, session, csrftoken, sessionid, config, auth_un_pw, debug):
-        super().__init__(f'{output_dir}{os.path.sep}d4iot', reports_dir, csrftoken, session, debug)
+    """Collects data from D4IoT sensors and management consoles via their REST APIs.
+
+    Note: D4IoT does not participate in the TokenManager refresh system since it uses
+    cookie-based auth (sensor) and static API tokens (sensor API, management console)
+    rather than MSAL OAuth tokens.
+    """
+    def __init__(self, output_dir, reports_dir, session, csrftoken, sessionid, config, auth_un_pw, debug, force_repull=False):
+        super().__init__(f'{output_dir}{os.path.sep}d4iot', reports_dir, csrftoken, session, debug, force_repull=force_repull)
         self.logger = setup_logger(__name__, debug)
         if auth_un_pw is not None:
             if auth_un_pw['auth']['d4iot_sensor_token']:
@@ -35,6 +50,11 @@ class DefenderIoTDumper(DataDumper):
         self.sessionid = sessionid
 
     async def helper_multiple_object_sensor(self, parent, child, identifier='id'):
+        """Fetch a parent list from the sensor API, then download a child resource for each.
+
+        Used primarily for downloading per-alert PCAPs: fetches the alert list (parent),
+        then downloads the filtered PCAP (child) for each alert ID using cookie auth.
+        """
         if not self.csrftoken or not self.sessionid:
             self.logger.error(f"Missing csrftoken and sessionid from auth. Did you auth correctly?")
             return
@@ -68,6 +88,7 @@ class DefenderIoTDumper(DataDumper):
                     f.write(output)
 
     async def helper_single_object_sensor(self, url, object) -> None:
+        """Fetch a single endpoint from the D4IoT sensor REST API and write results to JSONL."""
         if not self.sensor_token:
             self.logger.error(f"Missing sensor api token. Acquire the token from the portal to proceed")
             return
@@ -97,77 +118,105 @@ class DefenderIoTDumper(DataDumper):
         """
         Dump sensor devices
         """
+        if self.check_savestate("sensor_devices"):
+            return
         url = "https://" + str(self.sensor_ip) + "/api/v1/devices"
         object = 'devices'
         await self.helper_single_object_sensor(url, object)
+        self.write_savestate("sensor_devices")
 
     async def dump_sensor_alerts(self) -> None:
         """
         Dump sensor alerts
         """
+        if self.check_savestate("sensor_alerts"):
+            return
         url = "https://" + str(self.sensor_ip) + "/api/v1/alerts"
         object = 'alerts'
         await self.helper_single_object_sensor(url, object)
+        self.write_savestate("sensor_alerts")
 
     async def dump_sensor_device_connections(self) -> None:
         """
         Collect all device connections
         https://learn.microsoft.com/en-us/azure/defender-for-iot/organizations/api/sensor-inventory-apis?tabs=connections-request%2Cconnections-device-request%2Ccves-request%2Ccves-ip-request%2Cdevices-request
         """
+        if self.check_savestate("sensor_device_connections"):
+            return
         url = "https://" + str(self.sensor_ip) + "/api/v1/devices/connections"
         object = 'device_connections'
         await self.helper_single_object_sensor(url, object)
+        self.write_savestate("sensor_device_connections")
 
     async def dump_sensor_device_cves(self) -> None:
         """
         Dummp sensor device known cves
         """
+        if self.check_savestate("sensor_device_cves"):
+            return
         url = "https://" + str(self.sensor_ip) + "/api/v1/devices/cves"
         object = 'devices_cves'
         await self.helper_single_object_sensor(url, object)
+        self.write_savestate("sensor_device_cves")
 
     async def dump_sensor_events(self) -> None:
         """
         Dump sensor events
         """
+        if self.check_savestate("sensor_events"):
+            return
         url = "https://" + str(self.sensor_ip) + "/api/v1/events"
         object = 'events'
         await self.helper_single_object_sensor(url, object)
+        self.write_savestate("sensor_events")
 
     async def dump_sensor_device_vuln(self) -> None:
         """
         Dump sensor device known vulnerabilities
         """
+        if self.check_savestate("sensor_device_vuln"):
+            return
         url = "https://" + str(self.sensor_ip) + "/api/v1/reports/vulnerabilities/devices"
         object = 'device_vulnerabilities'
         await self.helper_single_object_sensor(url, object)
+        self.write_savestate("sensor_device_vuln")
 
     async def dump_sensor_security_vuln(self) -> None:
         """
         Dump sensor security vulnerabilities
         """
+        if self.check_savestate("sensor_security_vuln"):
+            return
         url = "https://" + str(self.sensor_ip) + "/api/v1/reports/vulnerabilities/security"
         object = "security_vulnerabilities"
         await self.helper_single_object_sensor(url, object)
+        self.write_savestate("sensor_security_vuln")
 
     async def dump_sensor_operational_vuln(self) -> None:
         """
         Dump sensor operation vulnerabilities
         """
+        if self.check_savestate("sensor_operational_vuln"):
+            return
         url = "https://" + str(self.sensor_ip) + "/api/v1/reports/vulnerabilities/operational"
         object = 'operational_vulnerabilities'
         await self.helper_single_object_sensor(url, object)
+        self.write_savestate("sensor_operational_vuln")
 
     async def dump_sensor_pcap(self) -> None:
         """
         Dump sensor pcap
         """
+        if self.check_savestate("sensor_pcap"):
+            return
         parent = "/api/v1/alerts"
         child = "/api/alert/filtered-pcap/"
         await self.helper_multiple_object_sensor(parent, child)
+        self.write_savestate("sensor_pcap")
 
 
     async def helper_single_object_mgmt(self, url, object) -> None:
+        """Fetch a single endpoint from the D4IoT management console API and write results to JSONL."""
         if not self.mgmt_token:
             self.logger.error(f"Missing management console api token. Acquire the token from the portal to proceed")
             return
@@ -191,33 +240,45 @@ class DefenderIoTDumper(DataDumper):
         """
         Dump management devices
         """
+        if self.check_savestate("mgmt_devices"):
+            return
         url = "https://" + self.mgmt_ip + "/external/v1/devices"
         object = "mgmt_devices"
         await self.helper_single_object_mgmt(url,object)
+        self.write_savestate("mgmt_devices")
 
     async def dump_mgmt_alerts(self) -> None:
         """
         Dump management alerts
         """
+        if self.check_savestate("mgmt_alerts"):
+            return
         url = "https://" + self.mgmt_ip + "/external/v1/alerts"
         object = "mgmt_alerts"
         await self.helper_single_object_mgmt(url,object)
+        self.write_savestate("mgmt_alerts")
 
     async def dump_mgmt_sensor_info(self) -> None:
         """
         Dump management sensor information
         """
+        if self.check_savestate("mgmt_sensor_info"):
+            return
         url = "https://" + self.mgmt_ip + "/external/v3/integration/sensors"
         object = "sensor_info"
         await self.helper_single_object_mgmt(url,object)
+        self.write_savestate("mgmt_sensor_info")
 
     async def dump_mgmt_pcap(self) -> None:
         """
         Dump management sensor pcap captured
         """
+        if self.check_savestate("mgmt_pcap"):
+            return
         parent = "v1/alerts"
         child = 'v2/alerts/pcap'
         await self.helper_multiple_object_mgmt(parent,child)
+        self.write_savestate("mgmt_pcap")
 
 
     async def helper_multiple_object_mgmt(self, parent, child,identifier='id'):

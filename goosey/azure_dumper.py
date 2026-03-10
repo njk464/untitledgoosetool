@@ -2,7 +2,24 @@
 # -*- coding: utf-8 -*-
 
 """Untitled Goose Tool: azure_datadumper!
-This module has all the telemetry pulls for Azure resources.
+This module collects Azure resource telemetry across subscriptions.
+
+Uses two authentication mechanisms:
+- Azure SDK (ClientSecretCredential): For Azure Resource Manager APIs (VMs, networking,
+  storage, Security Center, etc.) via the azure-mgmt-* client libraries.
+- aiohttp + Log Analytics API: For querying Log Analytics workspace tables via KQL.
+
+Supports multi-subscription collection: if subscriptionid='all' in .conf, discovers
+all accessible subscriptions and creates per-subscription output directories.
+
+Key data sources:
+- Compute: VMs, disks
+- Networking: NICs, NSGs, public IPs, load balancers, virtual networks
+- Storage: accounts, containers, blob enumeration
+- Security: Security Center alerts, settings, auto-provisioning, contacts
+- Monitoring: activity logs, diagnostic settings
+- Web: App Services
+- Log Analytics: KQL queries against workspace tables
 """
 
 import asyncio
@@ -25,15 +42,22 @@ from azure.mgmt.storage import StorageManagementClient
 from azure.mgmt.web import WebSiteManagementClient
 from azure.storage.blob import BlobServiceClient
 from goosey.datadumper import DataDumper
+from goosey.progress import get_progress_manager
 from goosey.utils import *
 from typing import Optional
 
 utc = pytz.UTC
 
 class AzureDataDumper(DataDumper):
+    """Collects Azure subscription resources and Log Analytics workspace data.
 
-    def __init__(self, output_dir, reports_dir, session, app_auth, config, auth_un_pw, loganalytics_app_auth, debug, token_manager=None):
-        super().__init__(f'{output_dir}{os.path.sep}azure', reports_dir, app_auth, session, debug, token_manager=token_manager, endpoint_key="resource_manager")
+    Unlike other dumpers that primarily use aiohttp, this dumper also uses Azure SDK
+    management clients (ComputeManagementClient, NetworkManagementClient, etc.) which
+    authenticate via ClientSecretCredential.
+    """
+
+    def __init__(self, output_dir, reports_dir, session, app_auth, config, auth_un_pw, loganalytics_app_auth, debug, token_manager=None, force_repull=False):
+        super().__init__(f'{output_dir}{os.path.sep}azure', reports_dir, app_auth, session, debug, token_manager=token_manager, endpoint_key="resource_manager", force_repull=force_repull)
         self.logger = setup_logger(__name__, debug)
         self.failurefile = os.path.join(reports_dir, '_no_results.json')
         self.loganalytics_app_auth = loganalytics_app_auth
@@ -136,6 +160,8 @@ class AzureDataDumper(DataDumper):
         """
         Dump D4IOT portal pcaps from alerts
         """
+        if self.check_savestate("d4iot_portal_pcap"):
+            return
         header = self._make_auth_header()
 
         for subscriptionId in self.subscription_id_list:
@@ -263,6 +289,7 @@ class AzureDataDumper(DataDumper):
                                 return
                             else:
                                 self.logger.debug(result)
+        self.write_savestate("d4iot_portal_pcap")
 
     async def _dump_portal_alerts(self) -> None:
         """
@@ -447,11 +474,14 @@ class AzureDataDumper(DataDumper):
         """
         Dump D4IOT portal configs
         """
+        if self.check_savestate("d4iot_portal_configs"):
+            return
         caller_name = asyncio.current_task().get_name()
         async with asyncio.TaskGroup() as tg:
             tg.create_task(self._dump_portal_alerts(), name=f"{caller_name}_portal_alerts")
             tg.create_task(self._dump_portal_defendersettings(), name=f"{caller_name}_portal_defendersettings")
             tg.create_task(self._dump_portal_sensors(), name=f"{caller_name}_dump_portal_sensors")
+        self.write_savestate("d4iot_portal_configs")
 
     async def _dump_diagnostic_settings(self) -> None:
         """
@@ -560,6 +590,8 @@ class AzureDataDumper(DataDumper):
         :return:
         :rtype:
         """
+        if self.check_savestate("azure_subscriptions"):
+            return
         output = os.path.join(self.output_dir, "subscriptions.json")
         if os.path.exists(output):
             self.logger.debug("All subscriptions file exists... Proceeding without pulling")
@@ -576,6 +608,8 @@ class AzureDataDumper(DataDumper):
                 self.logger.info('Finished getting all Azure Subscriptions.')
             except Exception as e:
                 self.logger.error(f"Error getting subscriptions: {str(e)}\nDo you have the right credentials in your .conf file?")
+                return
+        self.write_savestate("azure_subscriptions")
 
     async def _dump_file_shares(self) -> None:
         """
@@ -797,7 +831,8 @@ class AzureDataDumper(DataDumper):
             start = dateutil.parser.parse(self.date_start).replace(tzinfo=utc)
             end = dateutil.parser.parse(self.date_end).replace(tzinfo=utc)
 
-        tasks = []
+        # Discover all tables across all workspaces, then create a single progress bar
+        table_tasks = []  # list of (table, table_start, table_end, url, statefile, outfile) tuples
         for subscriptionId in self.subscription_id_list:
             url = f"{self.endpoints['resource_manager']}/subscriptions/{subscriptionId}/providers/Microsoft.OperationalInsights/"
             self.logger.debug(url)
@@ -811,19 +846,16 @@ class AzureDataDumper(DataDumper):
                 return
             with open(workspaces_file, "r") as f:
                 for line in f:
-                    #self.logger.debug(json.dumps(json.loads(line), indent=2))
                     workspace_dict = json.loads(line)
                     workspace_name = workspace_dict["name"]
                     workspace_id = workspace_dict["id"]
                     self.logger.debug(f"summarizing {workspace_name}")
-                    url = f"{self.endpoints['log_analytics_api']}/v1{workspace_id}/query"
-                    results, err, _, _ = await run_kql_query("search \"*\"", start, end, None, url, self.loganalytics_app_auth, self.logger, self.ahsession, summarize=True)
-                    #self.logger.debug(json.dumps(results, indent=2, default=str))
+                    query_url = f"{self.endpoints['log_analytics_api']}/v1{workspace_id}/query"
+                    results, err, _, _ = await run_kql_query("search \"*\"", start, end, None, query_url, self.loganalytics_app_auth, self.logger, self.ahsession, summarize=True)
                     for row in results:
                         self.logger.debug(row)
                         table = row["$table"]
 
-                        # create a task dumping the table with the save state being per table per workspace
                         workspace_log_dir = os.path.join(output_dir, workspace_name)
                         check_output_dir(workspace_log_dir, self.logger)
 
@@ -834,25 +866,61 @@ class AzureDataDumper(DataDumper):
                         table_end = end
                         if saved_end:
                             table_start = max(saved_end, table_start)
-                        # Use asyncio to use asyncronous coroutines to help ensure we get data before it rolls off
                         self.logger.debug(f"Generating table dump task for table: {table}, start: {start}, end: {end}")
-                        caller_name = asyncio.current_task().get_name()
-                        tasks.append(asyncio.create_task(self._dump_table(table, table_start, table_end, url, statefile=statefile, outfile=outfile),name=f"{caller_name}_{workspace_name}_{table}"))
+                        table_tasks.append((table, table_start, table_end, query_url, statefile, outfile))
+
+        if not table_tasks:
+            return
+
+        # Single progress bar: total = sum of hours across all tables
+        pm = get_progress_manager()
+        table_hours = []
+        for _, ts, te, _, _, _ in table_tasks:
+            secs = max(int((te - ts).total_seconds()), 1)
+            table_hours.append(max(secs // 3600, 1))
+        total_hours = sum(table_hours)
+        bar = None
+        bar_name = "azure_log_analytics"
+        if pm:
+            bar = pm.create_time_bar(bar_name, total_hours, desc=f"{'Log Analytics Workspaces':<35}", unit='hr')
+            if bar:
+                bar.bar_format = "{desc} |{bar}| {percentage:3.0f}% | {n_fmt}/{total_fmt} hrs | elapsed {elapsed}"
+
+        # Shared mutable progress state for all table tasks
+        law_progress = {"bar": bar, "pm": pm, "bar_name": bar_name, "hours_done": 0, "total_hours": total_hours}
+
+        tasks = []
+        for i, (table, ts, te, qurl, sf, of) in enumerate(table_tasks):
+            caller_name = asyncio.current_task().get_name()
+            tasks.append(asyncio.create_task(
+                self._dump_table(table, ts, te, qurl, statefile=sf, outfile=of, law_progress=law_progress, table_total_hours=table_hours[i]),
+                name=f"{caller_name}_{table}"))
         await asyncio.gather(*tasks)
 
+        # Mark the single bar complete
+        if bar:
+            remaining = total_hours - law_progress["hours_done"]
+            if remaining > 0:
+                bar.update(remaining)
+        if pm:
+            pm.complete_task(bar_name)
+    dump_log_analytic_workspaces._manages_own_progress = True
 
-    async def _dump_table(self, base_query, start, end, url, statefile, outfile, retries=3):
+
+    async def _dump_table(self, base_query, start, end, url, statefile, outfile, retries=3, law_progress=None, table_total_hours=None):
         """
-        Description:
-            Query the log analytics workspace and pull logs for the table under the timeframe
+        Query the log analytics workspace and pull logs for the table under the timeframe.
 
-        Arguments:
-            base_query: what to start with for the query
+        Args:
+            base_query: table name / KQL query
             start: starting timestamp
             end: ending timestamp
-            path: path to the endpoint for the queries
-            output_dir: where to place the logs
-            machine_id: Optional id of a mahcine to filter down the query
+            url: Log Analytics API endpoint
+            statefile: path to save state checkpoint
+            outfile: path to write JSONL output
+            retries: max retry attempts
+            law_progress: shared dict with 'bar', 'pm', 'bar_name', 'hours_done', 'total_hours'
+            table_total_hours: this table's share of the total hours in the progress bar
         """
         totalResultCount = 0
         totalResultEnd = start
@@ -860,6 +928,36 @@ class AzureDataDumper(DataDumper):
         origStart = start
         finalEnd = end
         tries = 0
+
+        # Track this table's contribution to the shared progress bar
+        my_total_hours = table_total_hours or 1
+        my_hours_reported = 0
+
+        def _update_progress(covered_end):
+            """Update the shared LAW progress bar based on time covered."""
+            nonlocal my_hours_reported
+            if not law_progress or not law_progress.get("bar"):
+                return
+            covered_secs = max((covered_end - origStart).total_seconds(), 0)
+            total_secs = max((finalEnd - origStart).total_seconds(), 1)
+            fraction = min(covered_secs / total_secs, 1.0)
+            my_covered = int(fraction * my_total_hours)
+            delta = my_covered - my_hours_reported
+            if delta > 0:
+                law_progress["bar"].update(delta)
+                law_progress["hours_done"] += delta
+                my_hours_reported = my_covered
+
+        def _complete_progress():
+            """Flush remaining hours for this table to the shared bar."""
+            nonlocal my_hours_reported
+            if not law_progress or not law_progress.get("bar"):
+                return
+            delta = my_total_hours - my_hours_reported
+            if delta > 0:
+                law_progress["bar"].update(delta)
+                law_progress["hours_done"] += delta
+                my_hours_reported = my_total_hours
         # final record is so that it will stop when it gets to the last record
         # and we don't have to worry about the list being empty or changing the logic for
         # an edge case
@@ -882,11 +980,13 @@ class AzureDataDumper(DataDumper):
                 if origStart == start and finalEnd == end:
                     self.logger.debug(f"No logs for {base_query} from {start} to {end}")
                     save_state(statefile, end)
+                    _complete_progress()
                     return
                 # Otherwise it just means this lower time segment has no logs and we remove it and continue
                 start = end
                 end = finalEnd
                 bounds = [final_record]
+                _update_progress(start)
                 continue
             elif summary != None and summary[0]["Count"] > 0:
                 tries = 0
@@ -919,6 +1019,7 @@ class AzureDataDumper(DataDumper):
                 if summary[0]["Count"] == 0:
                     end = bounds[0]["end"]
                     start = bounds[0]["start"]
+                    _update_progress(start)
                     continue
 
             results, err, end, bounds = await run_kql_query(base_query, start, end, bounds, url, self.loganalytics_app_auth, self.logger, self.ahsession)
@@ -935,6 +1036,7 @@ class AzureDataDumper(DataDumper):
                         f.write(json.dumps(x) + '\n')
 
                 save_state(statefile, end)
+                _update_progress(end)
 
                 tries = 0
                 end = bounds[0]["end"]
@@ -942,6 +1044,9 @@ class AzureDataDumper(DataDumper):
                 if bounds[0]["count"] != None and bounds[0]["count"] >= LAW_QUERY_THRESHOLD:
                     new_end_ts = start.timestamp() + ((end.timestamp() - start.timestamp())/2)
                     end = datetime.fromtimestamp(new_end_ts, utc)
+
+        # Mark this table's share of progress complete
+        _complete_progress()
 
 
     async def auxiliary_storage_log_pull(self, container_name, log_type):
@@ -1077,9 +1182,16 @@ class AzureDataDumper(DataDumper):
             self.logger.debug("Caught HTTP Response Error on subscription " + sub_id + " for " + name)
             self.logger.debug('Error: {}'.format(str(e)))
 
+    # Max concurrent config pulls per batch to avoid event loop starvation
+    CONFIG_BATCH_SIZE = 15
+
     async def dump_configs(self) -> None:
         """
-        Dump Azure configuration information
+        Dump Azure configuration information.
+
+        Batches API calls into groups to avoid event loop starvation when running
+        alongside other dumpers. Uses a per-subscription save state to skip
+        re-pulling configs that were already collected.
         """
         for i in range(0, len(self.subscription_id_list)):
             sub_id = self.subscription_id_list[i]
@@ -1088,13 +1200,20 @@ class AzureDataDumper(DataDumper):
             scope = "/subscriptions/" + sub_id
             caller_name = asyncio.current_task().get_name()
 
-            if self.gcc_high.lower() == "false":
-                await asyncio.gather(
-                    self.auxiliary_list_all(security_client.settings, sub_id, "list", caller=caller_name),
-                    self.auxiliary_list_all(security_client.security_solutions, sub_id, "list", caller=caller_name)
-                )
+            # Check save state: skip this subscription if configs already pulled
+            config_state_name = f"azure_configs_{sub_id}"
+            if self.check_savestate(config_state_name):
+                continue
 
-            await asyncio.gather(
+            # Build the full list of config coroutines to run
+            config_coros = []
+
+            if self.gcc_high.lower() == "false":
+                config_coros.append(self.auxiliary_list_all(security_client.settings, sub_id, "list", caller=caller_name))
+                config_coros.append(self.auxiliary_list_all(security_client.security_solutions, sub_id, "list", caller=caller_name))
+
+            # Security configs
+            config_coros.extend([
                 self.auxiliary_list_all(security_client.alerts, sub_id, "list", caller=caller_name),
                 self.auxiliary_list_all(security_client.allowed_connections, sub_id, "list", caller=caller_name),
                 self.auxiliary_list_all(security_client.applications, sub_id, "list", caller=caller_name),
@@ -1116,6 +1235,10 @@ class AzureDataDumper(DataDumper):
                 self.auxiliary_list_all(security_client.tasks, sub_id, "list", caller=caller_name),
                 self.auxiliary_list_all(security_client.topology, sub_id, "list", caller=caller_name),
                 self.auxiliary_list_all(security_client.workspace_settings, sub_id, "list", caller=caller_name),
+            ])
+
+            # Network configs
+            config_coros.extend([
                 self.auxiliary_list_all(network_manager.application_gateways, sub_id, "list_all", caller=caller_name),
                 self.auxiliary_list_all(network_manager.application_security_groups, sub_id, "list_all", caller=caller_name),
                 self.auxiliary_list_all(network_manager.azure_firewall_fqdn_tags, sub_id, "list_all", caller=caller_name),
@@ -1156,9 +1279,15 @@ class AzureDataDumper(DataDumper):
                 self.auxiliary_list_all(network_manager.vpn_gateways, sub_id, "list", caller=caller_name),
                 self.auxiliary_list_all(network_manager.vpn_server_configurations, sub_id, "list", caller=caller_name),
                 self.auxiliary_list_all(network_manager.vpn_sites, sub_id, "list", caller=caller_name),
-                self.auxiliary_list_all(network_manager.web_application_firewall_policies, sub_id, "list_all", caller=caller_name)
-            )
+                self.auxiliary_list_all(network_manager.web_application_firewall_policies, sub_id, "list_all", caller=caller_name),
+            ])
 
+            # Run config pulls in batches to avoid event loop starvation
+            for batch_start in range(0, len(config_coros), self.CONFIG_BATCH_SIZE):
+                batch = config_coros[batch_start:batch_start + self.CONFIG_BATCH_SIZE]
+                await asyncio.gather(*batch)
+
+            # Resource/compute/storage configs (already naturally bounded)
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(self._dump_container_config(), name=f"{caller_name}_dump_container_config")
                 tg.create_task(self._dump_vm_config(), name=f"{caller_name}_dump_vm_config")
@@ -1166,3 +1295,6 @@ class AzureDataDumper(DataDumper):
                 tg.create_task(self._dump_diagnostic_settings(), name=f"{caller_name}_dump_diagnostic_settings")
                 tg.create_task(self._dump_file_shares(), name=f"{caller_name}_dump_file_shares")
                 tg.create_task(self._dump_storage_accounts(), name=f"{caller_name}_dump_storage_accounts")
+
+            # Mark this subscription's configs as complete
+            self.write_savestate(config_state_name)
