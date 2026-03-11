@@ -14,6 +14,18 @@ Usage:
     goosey setup --app_name GooseApp --create --gcc_high
     goosey setup --app_name GooseApp --create --no_subscriptions
     goosey setup --app_name GooseApp --create --force
+
+@decision DEC-SETUP-001
+@title Auth-upfront pattern for setup flow
+@status accepted
+@rationale The web UI and CLI users both benefit from collecting all authentication
+  upfront before any work begins. Previously, 3-4 separate browser auth popups were
+  scattered throughout execution (Graph token, Azure credential x2, EXO token, password).
+  This broke the web UI flow because auth prompts appeared unexpectedly mid-execution.
+  The new pattern: Phase 1 collects user inputs, Phase 2 acquires ALL tokens/credentials
+  at once (with clear step indicators), Phase 3 performs all work non-interactively
+  (except user-choice y/n subscription selection prompts). The azure_credential.get_token()
+  call forces the browser popup immediately rather than lazily on first use.
 """
 
 import getpass
@@ -261,8 +273,19 @@ class ExchangeClient:
         return result
 
 
-def create_app(graph, app_name, subscriptions_used, env, gcc_high=False):
-    """Create the Entra ID app registration, service principal, permissions, and roles."""
+def create_app(graph, app_name, subscriptions_used, env, credential=None, gcc_high=False):
+    """Create the Entra ID app registration, service principal, permissions, and roles.
+
+    Args:
+        graph: GraphClient instance with a valid token.
+        app_name: Display name for the app registration.
+        subscriptions_used: List of subscription IDs (or ["all"]) for IAM role assignment.
+        env: Environment config dict from get_env_config().
+        credential: Pre-acquired azure.identity credential for Azure IAM role assignment.
+            If None and subscriptions_used is non-empty, a new InteractiveBrowserCredential
+            is created (legacy fallback — prefer passing credential for auth-upfront flow).
+        gcc_high: Unused; kept for backwards compatibility.
+    """
     # 1. Create or get app registration
     app = graph.get_app_by_name(app_name)
     if not app:
@@ -319,7 +342,10 @@ def create_app(graph, app_name, subscriptions_used, env, gcc_high=False):
 
     # 4. Assign Azure subscription IAM roles
     if subscriptions_used:
-        credential = InteractiveBrowserCredential()
+        # Use the pre-acquired credential if provided; fall back to creating a new one
+        # only if called directly without the auth-upfront setup() flow.
+        if credential is None:
+            credential = InteractiveBrowserCredential()
         sub_client = SubscriptionClient(credential)
         all_subs = list(sub_client.subscriptions.list())
 
@@ -435,8 +461,17 @@ def create_exchange_sp(exo, graph, app_name):
             print(f"  ERROR adding to role group: {e}")
 
 
-def delete_app(graph, app_name, force=False):
-    """Delete the Entra ID app registration, service principal, and subscription roles."""
+def delete_app(graph, app_name, force=False, credential=None):
+    """Delete the Entra ID app registration, service principal, and subscription roles.
+
+    Args:
+        graph: GraphClient instance with a valid token.
+        app_name: Display name of the app to delete.
+        force: Skip the y/n confirmation prompt.
+        credential: Pre-acquired azure.identity credential for removing subscription IAM
+            role assignments. If None, a new InteractiveBrowserCredential is created
+            (legacy fallback — prefer passing credential for auth-upfront flow).
+    """
     if not force:
         confirm = input(f"Are you sure you want to delete '{app_name}'? (y/n): ").strip().lower()
         if confirm != "y":
@@ -449,11 +484,13 @@ def delete_app(graph, app_name, force=False):
         sp_id = sp["id"]
         print(f"Removing subscription IAM roles...")
         try:
-            credential = InteractiveBrowserCredential()
-            sub_client = SubscriptionClient(credential)
+            # Use pre-acquired credential if provided; fall back to creating a new one
+            # only when called directly without the auth-upfront setup() flow.
+            azure_credential = credential if credential is not None else InteractiveBrowserCredential()
+            sub_client = SubscriptionClient(azure_credential)
             for sub in sub_client.subscriptions.list():
                 sub_id = sub.subscription_id
-                auth_client = AuthorizationManagementClient(credential, sub_id)
+                auth_client = AuthorizationManagementClient(azure_credential, sub_id)
                 scope = f"/subscriptions/{sub_id}"
                 assignments = list(auth_client.role_assignments.list_for_scope(
                     scope, filter=f"principalId eq '{sp_id}'"
@@ -524,9 +561,18 @@ def delete_exchange_sp(exo, graph, app_name, force=False):
         print(f"  WARNING: {e}")
 
 
-def choose_subscriptions(force=False):
-    """Prompt user to select which subscriptions to assign IAM roles on."""
-    credential = InteractiveBrowserCredential()
+def choose_subscriptions(credential, force=False):
+    """Prompt user to select which subscriptions to assign IAM roles on.
+
+    Args:
+        credential: Pre-acquired azure.identity credential (e.g. InteractiveBrowserCredential).
+            Accepts the credential rather than creating one internally so that the
+            auth-upfront setup() flow can pass a single credential acquired at the start.
+        force: If True, automatically select all subscriptions without prompting.
+
+    Returns:
+        List of subscription IDs, or ["all"] if all were selected, or [] if none found.
+    """
     sub_client = SubscriptionClient(credential)
     subscriptions = list(sub_client.subscriptions.list())
 
@@ -568,6 +614,10 @@ def setup(app_name=None,
     and generates a client secret. Automatically writes a .auth file (encrypted by
     default) so you can proceed directly to goosey auth.
 
+    All authentication is performed upfront before any work begins (auth-upfront pattern,
+    see DEC-SETUP-001). This prevents unexpected mid-execution browser auth popups and
+    ensures compatibility with the web UI flow.
+
     Args:
         app_name: Display name for the Azure application
         create: Create the application and service principal
@@ -579,6 +629,7 @@ def setup(app_name=None,
         outpath_auth: Path for the auth config file (default: .auth)
         debug: Enable debug output
     """
+    # Phase 1: User Inputs
     if not app_name:
         app_name = input("Enter the application name: ").strip()
         if not app_name:
@@ -599,50 +650,64 @@ def setup(app_name=None,
 
     env = get_env_config(gcc_high)
 
-    # Authenticate to Microsoft Graph
-    print("Authenticating to Microsoft Graph...")
-    graph_token, tenant_id = acquire_graph_token(env)
-    graph = GraphClient(graph_token, env["graph_url"])
-
-    if not tenant_id:
-        # Fall back to fetching tenant from the organization endpoint
-        org = graph.get("/organization")
-        tenant_id = org["value"][0]["id"]
-
-    print(f"Tenant ID: {tenant_id}")
-
     if create:
-        # Choose subscriptions
-        subscriptions_used = []
+        # Phase 2: Authentication (ALL upfront) — DEC-SETUP-001
+        print("\n--- Authenticating ---")
+        print("You will be prompted to authenticate via browser. Complete all auth steps now.\n")
+
+        # 2a. Graph token
+        print("Step 1/3: Authenticating to Microsoft Graph...")
+        graph_token, tenant_id = acquire_graph_token(env)
+        graph = GraphClient(graph_token, env["graph_url"])
+        if not tenant_id:
+            org = graph.get("/organization")
+            tenant_id = org["value"][0]["id"]
+        print(f"Tenant ID: {tenant_id}")
+
+        # 2b. Azure credential (for subscription roles)
+        azure_credential = None
         if not no_subscriptions:
-            subscriptions_used = choose_subscriptions(force)
+            print("Step 2/3: Authenticating to Azure Resource Manager...")
+            azure_credential = InteractiveBrowserCredential()
+            # Force token acquisition now to trigger the browser popup immediately
+            # rather than lazily on first use mid-flow (auth-upfront, DEC-SETUP-001).
+            azure_credential.get_token("https://management.azure.com/.default")
+        else:
+            print("Step 2/3: Skipping Azure auth (--no_subscriptions)")
 
-        # Create Entra ID app + service principal + permissions + roles
-        app_id, sp_id, client_secret = create_app(
-            graph, app_name, subscriptions_used, env, gcc_high
-        )
-
-        # Create Exchange Online service principal
-        print("\nAuthenticating to Exchange Online...")
+        # 2c. EXO token
+        print("Step 3/3: Authenticating to Exchange Online...")
         exo_token = acquire_exo_token(env, tenant_id)
-        exo = ExchangeClient(exo_token, env["exo_url"], tenant_id)
-        create_exchange_sp(exo, graph, app_name)
 
-        # Write .auth file
-        auth_s = "[auth]\n"
-        auth_s += f"appid={app_id}\n"
-        auth_s += f"clientsecret={client_secret}\n"
-        auth_s += "ests_cookie=\n"
-        auth_s += "portal_refresh_token=\n"
-
+        # 2d. Encryption password (if needed)
         encryption_pw = None
         if not insecure:
-            encryption_pw = getpass.getpass("Create a password for .auth file encryption: ")
+            encryption_pw = getpass.getpass("\nCreate a password for .auth file encryption: ")
             confirm_pw = getpass.getpass("Confirm encryption password: ")
             if encryption_pw != confirm_pw:
                 print("Passwords do not match. Writing unencrypted .auth file instead.")
                 encryption_pw = None
 
+        print("\n--- Authentication complete. Running setup... ---\n")
+
+        # Phase 3: Work (non-interactive except subscription selection y/n prompts)
+        subscriptions_used = []
+        if not no_subscriptions and azure_credential:
+            subscriptions_used = choose_subscriptions(azure_credential, force)
+
+        app_id, sp_id, client_secret = create_app(
+            graph, app_name, subscriptions_used, env, credential=azure_credential, gcc_high=gcc_high
+        )
+
+        exo = ExchangeClient(exo_token, env["exo_url"], tenant_id)
+        create_exchange_sp(exo, graph, app_name)
+
+        # Write .auth file (encryption_pw already collected upfront)
+        auth_s = "[auth]\n"
+        auth_s += f"appid={app_id}\n"
+        auth_s += f"clientsecret={client_secret}\n"
+        auth_s += "ests_cookie=\n"
+        auth_s += "portal_refresh_token=\n"
         write_auth(outpath_auth, auth_s, encryption_pw=encryption_pw, insecure=(encryption_pw is None))
 
         if encryption_pw:
@@ -660,17 +725,41 @@ def setup(app_name=None,
         print("=" * 70)
 
     elif delete:
-        # Delete Exchange Online service principal first
-        print("\nAuthenticating to Exchange Online...")
+        # Phase 2: Authentication (ALL upfront) — DEC-SETUP-001
+        print("\n--- Authenticating ---")
+        print("You will be prompted to authenticate via browser. Complete all auth steps now.\n")
+
+        # 2a. Graph token
+        print("Step 1/3: Authenticating to Microsoft Graph...")
+        graph_token, tenant_id = acquire_graph_token(env)
+        graph = GraphClient(graph_token, env["graph_url"])
+        if not tenant_id:
+            org = graph.get("/organization")
+            tenant_id = org["value"][0]["id"]
+        print(f"Tenant ID: {tenant_id}")
+
+        # 2b. EXO token
+        print("Step 2/3: Authenticating to Exchange Online...")
+        exo = None
         try:
             exo_token = acquire_exo_token(env, tenant_id)
             exo = ExchangeClient(exo_token, env["exo_url"], tenant_id)
-            delete_exchange_sp(exo, graph, app_name, force)
         except Exception as e:
-            print(f"WARNING: Could not clean up Exchange components: {e}")
+            print(f"WARNING: Exchange auth failed: {e}")
 
-        # Delete Entra ID app + service principal + roles
-        delete_app(graph, app_name, force)
+        # 2c. Azure credential (for subscription role cleanup)
+        print("Step 3/3: Authenticating to Azure Resource Manager...")
+        azure_credential = InteractiveBrowserCredential()
+        # Force token acquisition now to trigger the browser popup immediately
+        # rather than lazily on first use mid-flow (auth-upfront, DEC-SETUP-001).
+        azure_credential.get_token("https://management.azure.com/.default")
+
+        print("\n--- Authentication complete. Running deletion... ---\n")
+
+        # Phase 3: Work (non-interactive)
+        if exo:
+            delete_exchange_sp(exo, graph, app_name, force)
+        delete_app(graph, app_name, force, credential=azure_credential)
 
         print("\nDeletion complete.")
 
