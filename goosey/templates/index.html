@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Untitled Goose Tool</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+<style>
+  body { background: #1a1a2e; color: #e0e0e0; }
+  .nav-tabs .nav-link { color: #8892b0; }
+  .nav-tabs .nav-link.active { color: #64ffda; background: #16213e; border-color: #64ffda #16213e #16213e; }
+  .card { background: #16213e; border: 1px solid #0f3460; }
+  .card-header { background: #0f3460; border-bottom: 1px solid #1a1a2e; cursor: pointer; }
+  .form-check-input:checked { background-color: #64ffda; border-color: #64ffda; }
+  .btn-goose { background: #64ffda; color: #1a1a2e; font-weight: 600; }
+  .btn-goose:hover { background: #52d9c0; color: #1a1a2e; }
+  .btn-danger { background: #ff6b6b; border-color: #ff6b6b; }
+  .output-area {
+    background: #0a0a1a; border: 1px solid #0f3460; border-radius: 6px 6px 0 0;
+    padding: 12px; font-family: 'Consolas', 'Monaco', monospace; font-size: 13px;
+    height: 350px; overflow-y: auto; white-space: pre-wrap; color: #a8ff78;
+  }
+  .output-area .error { color: #ff6b6b; }
+  .output-area .done { color: #64ffda; font-weight: bold; }
+  .output-area .prompt { color: #ffd93d; }
+  .input-bar {
+    display: none; border: 1px solid #0f3460; border-top: none; border-radius: 0 0 6px 6px;
+    background: #0d0d1a; padding: 6px 8px;
+  }
+  .input-bar.active { display: flex; }
+  .input-bar input {
+    flex: 1; background: #1a1a2e; border: 1px solid #0f3460; color: #ffd93d;
+    font-family: 'Consolas', 'Monaco', monospace; font-size: 13px; padding: 4px 8px;
+    border-radius: 4px; outline: none;
+  }
+  .input-bar input:focus { border-color: #64ffda; }
+  .input-bar input::placeholder { color: #4a5568; }
+  .input-bar button {
+    margin-left: 6px; background: #64ffda; color: #1a1a2e; border: none;
+    border-radius: 4px; padding: 4px 12px; font-weight: 600; font-size: 13px; cursor: pointer;
+  }
+  .input-bar .input-label { color: #8892b0; font-size: 12px; margin-right: 8px; white-space: nowrap; align-self: center; }
+  .section-title { color: #64ffda; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+  .form-label { font-size: 0.85rem; color: #8892b0; }
+  .dump-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 4px; }
+  .dump-item { font-size: 0.85rem; }
+  .dump-item .form-check-label { color: #ccd6f6; }
+  .dump-item small { color: #6c757d; display: block; margin-left: 1.5rem; font-size: 0.75rem; }
+  .step-badge { display: inline-flex; align-items: center; justify-content: center;
+    width: 24px; height: 24px; border-radius: 50%; background: #64ffda; color: #1a1a2e;
+    font-weight: 700; font-size: 0.75rem; margin-right: 6px; }
+  .navbar { background: #0f3460 !important; }
+  .navbar-brand { color: #64ffda !important; font-weight: 700; }
+  h6 { color: #ccd6f6; }
+</style>
+</head>
+<body>
+
+<nav class="navbar navbar-dark mb-4">
+  <div class="container-fluid">
+    <span class="navbar-brand">Untitled Goose Tool</span>
+    <span class="text-muted small" id="workingDir"></span>
+  </div>
+</nav>
+
+<div class="container-fluid px-4">
+  <ul class="nav nav-tabs mb-3" role="tablist">
+    <li class="nav-item"><a class="nav-link active" data-bs-toggle="tab" href="#tab-setup"><span class="step-badge">1</span>Setup</a></li>
+    <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-conf"><span class="step-badge">2</span>Configure</a></li>
+    <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-collect"><span class="step-badge">3</span>Collect</a></li>
+  </ul>
+
+  <div class="tab-content">
+
+    <!-- ============== SETUP TAB ============== -->
+    <div class="tab-pane fade show active" id="tab-setup">
+      <div class="row">
+        <div class="col-lg-5">
+          <div class="card mb-3">
+            <div class="card-header"><h6 class="mb-0">App Registration Setup</h6></div>
+            <div class="card-body">
+              <p class="small text-muted">Create or delete the Entra ID app registration, service principal, API permissions, and Exchange Online configuration.</p>
+              <div class="mb-3">
+                <label class="form-label">Application Name</label>
+                <input type="text" class="form-control form-control-sm" id="setup-app_name" value="GooseApp">
+              </div>
+              <div class="row mb-3">
+                <div class="col">
+                  <div class="form-check"><input class="form-check-input" type="radio" name="setup-action" id="setup-create" value="create" checked><label class="form-check-label" for="setup-create">Create</label></div>
+                </div>
+                <div class="col">
+                  <div class="form-check"><input class="form-check-input" type="radio" name="setup-action" id="setup-delete" value="delete"><label class="form-check-label" for="setup-delete">Delete</label></div>
+                </div>
+              </div>
+              <div class="form-check mb-1"><input class="form-check-input" type="checkbox" id="setup-force"><label class="form-check-label" for="setup-force">Force (skip prompts)</label></div>
+              <div class="form-check mb-1"><input class="form-check-input" type="checkbox" id="setup-no_subscriptions"><label class="form-check-label" for="setup-no_subscriptions">No subscriptions (skip IAM roles)</label></div>
+              <div class="form-check mb-1"><input class="form-check-input" type="checkbox" id="setup-gcc_high"><label class="form-check-label" for="setup-gcc_high">GCC High</label></div>
+              <div class="form-check mb-1"><input class="form-check-input" type="checkbox" id="setup-insecure"><label class="form-check-label" for="setup-insecure">Insecure (no file encryption)</label></div>
+              <div class="form-check mb-3"><input class="form-check-input" type="checkbox" id="setup-debug"><label class="form-check-label" for="setup-debug">Debug</label></div>
+              <button class="btn btn-goose w-100" onclick="runSetup()">Run Setup</button>
+            </div>
+          </div>
+        </div>
+        <div class="col-lg-7">
+          <div class="section-title">Output</div>
+          <div class="output-area" id="setup-output"></div>
+          <div class="input-bar" id="setup-input-bar">
+            <span class="input-label" id="setup-input-label">Input:</span>
+            <input type="text" id="setup-input" placeholder="Type your response and press Enter...">
+            <button onclick="sendInput('setup')">Send</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============== CONFIGURE TAB ============== -->
+    <div class="tab-pane fade" id="tab-conf">
+      <div class="row mb-3">
+        <div class="col">
+          <button class="btn btn-goose" onclick="saveConf()">Save Configuration</button>
+          <button class="btn btn-outline-secondary ms-2" onclick="loadConf()">Reload</button>
+          <span class="ms-3 small text-muted" id="conf-status"></span>
+        </div>
+      </div>
+
+      <div class="row">
+        <!-- Left column: settings -->
+        <div class="col-lg-4">
+          <!-- Auth -->
+          <div class="card mb-3">
+            <div class="card-header" data-bs-toggle="collapse" data-bs-target="#conf-auth"><h6 class="mb-0">Auth Credentials (.auth)</h6></div>
+            <div class="collapse show" id="conf-auth">
+              <div class="card-body">
+                <div class="mb-2"><label class="form-label">App ID</label><input type="text" class="form-control form-control-sm conf-auth" data-section="auth" data-key="appid"></div>
+                <div class="mb-2"><label class="form-label">Client Secret</label><input type="password" class="form-control form-control-sm conf-auth" data-section="auth" data-key="clientsecret"></div>
+                <div class="mb-2"><label class="form-label">ESTS Cookie <span class="text-muted">(optional, MDE portal)</span></label><input type="password" class="form-control form-control-sm conf-auth" data-section="auth" data-key="ests_cookie"></div>
+                <div class="mb-2"><label class="form-label">Portal Refresh Token <span class="text-muted">(optional, MDE portal)</span></label><input type="password" class="form-control form-control-sm conf-auth" data-section="auth" data-key="portal_refresh_token"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Config -->
+          <div class="card mb-3">
+            <div class="card-header" data-bs-toggle="collapse" data-bs-target="#conf-config"><h6 class="mb-0">General Config</h6></div>
+            <div class="collapse show" id="conf-config">
+              <div class="card-body">
+                <div class="mb-2"><label class="form-label">Tenant ID</label><input type="text" class="form-control form-control-sm conf-field" data-section="config" data-key="tenant" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"></div>
+                <div class="mb-2"><label class="form-label">Subscription ID</label><input type="text" class="form-control form-control-sm conf-field" data-section="config" data-key="subscriptionid" value="All" placeholder="All or comma-separated IDs"></div>
+                <div class="form-check mb-1"><input class="form-check-input conf-field" type="checkbox" data-section="config" data-key="gcc" id="conf-gcc"><label class="form-check-label" for="conf-gcc">GCC</label></div>
+                <div class="form-check"><input class="form-check-input conf-field" type="checkbox" data-section="config" data-key="gcc_high" id="conf-gcc_high"><label class="form-check-label" for="conf-gcc_high">GCC High</label></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Filters -->
+          <div class="card mb-3">
+            <div class="card-header" data-bs-toggle="collapse" data-bs-target="#conf-filters"><h6 class="mb-0">Date Filters</h6></div>
+            <div class="collapse show" id="conf-filters">
+              <div class="card-body">
+                <div class="mb-2"><label class="form-label">Start Date</label><input type="date" class="form-control form-control-sm conf-field" data-section="filters" data-key="date_start"></div>
+                <div class="mb-2"><label class="form-label">End Date</label><input type="date" class="form-control form-control-sm conf-field" data-section="filters" data-key="date_end"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Variables -->
+          <div class="card mb-3">
+            <div class="card-header" data-bs-toggle="collapse" data-bs-target="#conf-vars"><h6 class="mb-0">Variables</h6></div>
+            <div class="collapse" id="conf-vars">
+              <div class="card-body">
+                <div class="mb-2"><label class="form-label">UAL Threshold</label><input type="number" class="form-control form-control-sm conf-field" data-section="variables" data-key="ual_threshold" value="5000" min="100" max="50000"></div>
+                <div class="mb-2"><label class="form-label">Max UAL Tasks</label><input type="number" class="form-control form-control-sm conf-field" data-section="variables" data-key="max_ual_tasks" value="5" min="1"></div>
+                <div class="mb-2"><label class="form-label">UAL Extra Start</label><input type="date" class="form-control form-control-sm conf-field" data-section="variables" data-key="ual_extra_start"></div>
+                <div class="mb-2"><label class="form-label">UAL Extra End</label><input type="date" class="form-control form-control-sm conf-field" data-section="variables" data-key="ual_extra_end"></div>
+                <div class="mb-2"><label class="form-label">UAL Record Type</label><input type="text" class="form-control form-control-sm conf-field" data-section="variables" data-key="ual_record_type" placeholder="e.g. ExchangeAdmin,SharePointFileOperation"></div>
+                <div class="mb-2"><label class="form-label">UAL Operations</label><input type="text" class="form-control form-control-sm conf-field" data-section="variables" data-key="ual_operations" placeholder="e.g. FileAccessed,UserLoggedIn"></div>
+                <div class="mb-2"><label class="form-label">UAL User IDs</label><input type="text" class="form-control form-control-sm conf-field" data-section="variables" data-key="ual_user_ids" placeholder="e.g. user@contoso.com"></div>
+                <div class="mb-2"><label class="form-label">UAL Free Text</label><input type="text" class="form-control form-control-sm conf-field" data-section="variables" data-key="ual_free_text"></div>
+                <div class="mb-2"><label class="form-label">UAL IP Addresses</label><input type="text" class="form-control form-control-sm conf-field" data-section="variables" data-key="ual_ip_addresses" placeholder="e.g. 192.168.1.1"></div>
+                <div class="mb-2"><label class="form-label">UAL Object IDs</label><input type="text" class="form-control form-control-sm conf-field" data-section="variables" data-key="ual_object_ids"></div>
+                <div class="mb-2"><label class="form-label">MDE Threshold</label><input type="number" class="form-control form-control-sm conf-field" data-section="variables" data-key="mde_threshold" value="10000"></div>
+                <div class="mb-2"><label class="form-label">MDE Query Mode</label>
+                  <select class="form-select form-select-sm conf-field" data-section="variables" data-key="mde_query_mode">
+                    <option value="table">table</option>
+                    <option value="machine">machine</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Right column: dump methods -->
+        <div class="col-lg-8">
+          <div id="dump-methods-container"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============== COLLECT TAB ============== -->
+    <div class="tab-pane fade" id="tab-collect">
+      <div class="row">
+        <div class="col-lg-5">
+          <div class="card mb-3">
+            <div class="card-header"><h6 class="mb-0">Data Collection</h6></div>
+            <div class="card-body">
+              <p class="small text-muted">Authenticates automatically, then collects data. Tokens refresh mid-run.</p>
+
+              <div class="section-title">File Paths</div>
+              <div class="mb-2"><label class="form-label">Auth File</label><input type="text" class="form-control form-control-sm" id="honk-authfile" value=".ugt_auth"></div>
+              <div class="mb-2"><label class="form-label">Config File</label><input type="text" class="form-control form-control-sm" id="honk-config" value=".conf"></div>
+              <div class="mb-2"><label class="form-label">Credentials File</label><input type="text" class="form-control form-control-sm" id="honk-auth" value=".auth"></div>
+              <div class="mb-2"><label class="form-label">Output Directory</label><input type="text" class="form-control form-control-sm" id="honk-output_dir" value="output"></div>
+              <div class="mb-2"><label class="form-label">Reports Directory</label><input type="text" class="form-control form-control-sm" id="honk-reports_dir" value="reports"></div>
+
+              <div class="section-title mt-3">Platform Overrides</div>
+              <p class="small text-muted mb-2">Enable all methods for a platform (overrides .conf)</p>
+              <div class="row mb-2">
+                <div class="col-6"><div class="form-check"><input class="form-check-input" type="checkbox" id="honk-m365"><label class="form-check-label" for="honk-m365">M365</label></div></div>
+                <div class="col-6"><div class="form-check"><input class="form-check-input" type="checkbox" id="honk-entraid"><label class="form-check-label" for="honk-entraid">Entra ID</label></div></div>
+                <div class="col-6"><div class="form-check"><input class="form-check-input" type="checkbox" id="honk-azure"><label class="form-check-label" for="honk-azure">Azure</label></div></div>
+                <div class="col-6"><div class="form-check"><input class="form-check-input" type="checkbox" id="honk-mde"><label class="form-check-label" for="honk-mde">MDE</label></div></div>
+              </div>
+
+              <div class="section-title mt-3">Options</div>
+              <div class="form-check mb-1"><input class="form-check-input" type="checkbox" id="honk-force_repull"><label class="form-check-label" for="honk-force_repull">Force re-pull (ignore save states)</label></div>
+              <div class="form-check mb-1"><input class="form-check-input" type="checkbox" id="honk-dry_run"><label class="form-check-label" for="honk-dry_run">Dry run</label></div>
+              <div class="form-check mb-1"><input class="form-check-input" type="checkbox" id="honk-insecure"><label class="form-check-label" for="honk-insecure">Insecure (no file encryption)</label></div>
+              <div class="form-check mb-3"><input class="form-check-input" type="checkbox" id="honk-debug"><label class="form-check-label" for="honk-debug">Debug</label></div>
+
+              <div class="mb-3"><label class="form-label">Encryption Password <span class="text-muted">(if encrypted)</span></label><input type="password" class="form-control form-control-sm" id="honk-encryption_pw"></div>
+
+              <div class="d-flex gap-2">
+                <button class="btn btn-goose flex-fill" onclick="runCollect()" id="collect-run-btn">Run Collection</button>
+                <button class="btn btn-danger" onclick="stopCollect()" id="collect-stop-btn" disabled>Stop</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="col-lg-7">
+          <div class="section-title">Output</div>
+          <div class="output-area" id="collect-output" style="height: 550px;"></div>
+          <div class="input-bar" id="collect-input-bar">
+            <span class="input-label" id="collect-input-label">Input:</span>
+            <input type="text" id="collect-input" placeholder="Type your response and press Enter...">
+            <button onclick="sendInput('collect')">Send</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- tab-content -->
+</div><!-- container -->
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+// ---- State ----
+// Track active task ID per output panel so input can be routed correctly
+const panelTasks = {};  // { 'setup': taskId, 'collect': taskId }
+
+// Password-like prompt patterns
+const PASSWORD_RE = /password|secret|encryption|credential/i;
+// General prompt patterns: lines ending with ": " or "? " or "(y/n)"
+const PROMPT_RE = /[:?]\s*$|\(y\/n\)\s*[:?]?\s*$/i;
+
+// ---- Helpers ----
+function appendOutput(elId, text, cls) {
+  const el = document.getElementById(elId);
+  const span = document.createElement('span');
+  if (cls) span.className = cls;
+  span.textContent = text + '\n';
+  el.appendChild(span);
+  el.scrollTop = el.scrollHeight;
+}
+
+function clearOutput(elId) {
+  document.getElementById(elId).innerHTML = '';
+}
+
+function showInputBar(panel, promptText) {
+  const bar = document.getElementById(`${panel}-input-bar`);
+  const input = document.getElementById(`${panel}-input`);
+  const label = document.getElementById(`${panel}-input-label`);
+  bar.classList.add('active');
+  // Switch to password mode if the prompt looks like a password request
+  if (PASSWORD_RE.test(promptText)) {
+    input.type = 'password';
+    label.textContent = 'Password:';
+  } else {
+    input.type = 'text';
+    label.textContent = 'Input:';
+  }
+  input.focus();
+}
+
+function hideInputBar(panel) {
+  const bar = document.getElementById(`${panel}-input-bar`);
+  bar.classList.remove('active');
+  document.getElementById(`${panel}-input`).value = '';
+}
+
+function sendInput(panel) {
+  const input = document.getElementById(`${panel}-input`);
+  const text = input.value;
+  const taskId = panelTasks[panel];
+  if (!taskId) return;
+
+  // Show masked or plain echo in output
+  const isPassword = input.type === 'password';
+  appendOutput(`${panel}-output`, isPassword ? '********' : text, 'prompt');
+
+  fetch(`/api/input/${taskId}`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({text})
+  });
+  input.value = '';
+  hideInputBar(panel);
+}
+
+function getPanelForOutput(outputElId) {
+  // 'setup-output' -> 'setup', 'collect-output' -> 'collect'
+  return outputElId.replace('-output', '');
+}
+
+function streamCommand(command, args, outputElId, onDone) {
+  const panel = getPanelForOutput(outputElId);
+  clearOutput(outputElId);
+  hideInputBar(panel);
+
+  fetch('/api/run', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({command, args})
+  })
+  .then(r => r.json())
+  .then(data => {
+    panelTasks[panel] = data.task_id;
+    appendOutput(outputElId, `> ${data.cmd}`, '');
+
+    const es = new EventSource(`/api/stream/${data.task_id}`);
+    es.onmessage = e => {
+      if (e.data.startsWith('[DONE]')) {
+        es.close();
+        appendOutput(outputElId, e.data, 'done');
+        hideInputBar(panel);
+        panelTasks[panel] = null;
+        if (onDone) onDone(data.task_id);
+      } else if (e.data.startsWith('[ERROR]')) {
+        appendOutput(outputElId, e.data, 'error');
+      } else {
+        appendOutput(outputElId, e.data, '');
+        // Detect prompts and show input bar
+        if (PROMPT_RE.test(e.data)) {
+          showInputBar(panel, e.data);
+        }
+      }
+    };
+    es.onerror = () => {
+      es.close();
+      appendOutput(outputElId, '[Connection lost]', 'error');
+      hideInputBar(panel);
+      panelTasks[panel] = null;
+      if (onDone) onDone(data.task_id);
+    };
+
+    // Store EventSource for stop functionality
+    if (panel === 'collect') {
+      panelTasks._collectES = es;
+    }
+  });
+}
+
+// ---- Input bar key handlers ----
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Enter') return;
+  for (const panel of ['setup', 'collect']) {
+    const input = document.getElementById(`${panel}-input`);
+    if (document.activeElement === input) {
+      e.preventDefault();
+      sendInput(panel);
+      return;
+    }
+  }
+});
+
+// ---- Setup ----
+function runSetup() {
+  const args = [];
+  const name = document.getElementById('setup-app_name').value;
+  if (name) args.push(`--app_name=${name}`);
+  const action = document.querySelector('input[name="setup-action"]:checked').value;
+  args.push(`--${action}`);
+  if (document.getElementById('setup-force').checked) args.push('--force');
+  if (document.getElementById('setup-no_subscriptions').checked) args.push('--no_subscriptions');
+  if (document.getElementById('setup-gcc_high').checked) args.push('--gcc_high');
+  if (document.getElementById('setup-insecure').checked) args.push('--insecure');
+  if (document.getElementById('setup-debug').checked) args.push('--debug');
+  streamCommand('setup', args, 'setup-output');
+}
+
+// ---- Configure ----
+function loadConf() {
+  fetch('/api/conf')
+    .then(r => r.json())
+    .then(data => {
+      // Populate conf fields
+      document.querySelectorAll('.conf-field').forEach(el => {
+        const section = el.dataset.section;
+        const key = el.dataset.key;
+        const val = (data.conf[section] || {})[key] || '';
+        if (el.type === 'checkbox') {
+          el.checked = val.toLowerCase() === 'true';
+        } else if (el.tagName === 'SELECT') {
+          el.value = val || el.options[0].value;
+        } else {
+          el.value = val;
+        }
+      });
+      // Populate auth fields
+      document.querySelectorAll('.conf-auth').forEach(el => {
+        const section = el.dataset.section;
+        const key = el.dataset.key;
+        el.value = (data.auth[section] || {})[key] || '';
+      });
+      // Render dump methods
+      renderDumpMethods(data.dump_methods, data.conf);
+      document.getElementById('conf-status').textContent = 'Loaded';
+      setTimeout(() => document.getElementById('conf-status').textContent = '', 2000);
+    });
+}
+
+function renderDumpMethods(methods, conf) {
+  const container = document.getElementById('dump-methods-container');
+  container.innerHTML = '';
+  const platformNames = {m365: 'M365 / Exchange Online', entraid: 'Entra ID', azure: 'Azure', mde: 'Microsoft Defender for Endpoint'};
+  for (const [platform, items] of Object.entries(methods)) {
+    const card = document.createElement('div');
+    card.className = 'card mb-3';
+    const confSection = conf[platform] || {};
+    card.innerHTML = `
+      <div class="card-header d-flex justify-content-between align-items-center" data-bs-toggle="collapse" data-bs-target="#dump-${platform}">
+        <h6 class="mb-0">${platformNames[platform] || platform}</h6>
+        <div>
+          <button class="btn btn-sm btn-outline-secondary me-1" onclick="event.stopPropagation(); toggleAll('${platform}', true)">All</button>
+          <button class="btn btn-sm btn-outline-secondary" onclick="event.stopPropagation(); toggleAll('${platform}', false)">None</button>
+        </div>
+      </div>
+      <div class="collapse show" id="dump-${platform}">
+        <div class="card-body">
+          <div class="dump-grid" id="dump-grid-${platform}"></div>
+        </div>
+      </div>`;
+    container.appendChild(card);
+    const grid = card.querySelector(`#dump-grid-${platform}`);
+    for (const m of items) {
+      const checked = (confSection[`dump_${m.key}`] || '').toLowerCase() === 'true';
+      const div = document.createElement('div');
+      div.className = 'dump-item';
+      div.innerHTML = `
+        <div class="form-check">
+          <input class="form-check-input dump-check" type="checkbox" id="dump-${platform}-${m.key}"
+            data-platform="${platform}" data-key="${m.key}" ${checked ? 'checked' : ''}>
+          <label class="form-check-label" for="dump-${platform}-${m.key}">${m.key}</label>
+          ${m.doc ? `<small>${m.doc}</small>` : ''}
+        </div>`;
+      grid.appendChild(div);
+    }
+  }
+}
+
+function toggleAll(platform, checked) {
+  document.querySelectorAll(`.dump-check[data-platform="${platform}"]`).forEach(el => el.checked = checked);
+}
+
+function saveConf() {
+  // Gather conf fields
+  const conf = {};
+  document.querySelectorAll('.conf-field').forEach(el => {
+    const section = el.dataset.section;
+    const key = el.dataset.key;
+    if (!conf[section]) conf[section] = {};
+    if (el.type === 'checkbox') {
+      conf[section][key] = el.checked ? 'true' : 'false';
+    } else if (el.tagName === 'SELECT') {
+      conf[section][key] = el.value;
+    } else {
+      conf[section][key] = el.value;
+    }
+  });
+  // Gather dump method checkboxes
+  document.querySelectorAll('.dump-check').forEach(el => {
+    const platform = el.dataset.platform;
+    const key = el.dataset.key;
+    if (!conf[platform]) conf[platform] = {};
+    conf[platform][`dump_${key}`] = el.checked ? 'true' : '';
+  });
+  // Gather auth fields
+  const auth = {};
+  document.querySelectorAll('.conf-auth').forEach(el => {
+    const section = el.dataset.section;
+    const key = el.dataset.key;
+    if (!auth[section]) auth[section] = {};
+    auth[section][key] = el.value;
+  });
+
+  fetch('/api/conf', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({conf, auth})
+  })
+  .then(r => r.json())
+  .then(() => {
+    document.getElementById('conf-status').textContent = 'Saved!';
+    document.getElementById('conf-status').style.color = '#64ffda';
+    setTimeout(() => { document.getElementById('conf-status').textContent = ''; document.getElementById('conf-status').style.color = ''; }, 2000);
+  });
+}
+
+// ---- Collect ----
+function runCollect() {
+  const args = [];
+  const v = id => document.getElementById(id).value;
+  const c = id => document.getElementById(id).checked;
+  if (v('honk-authfile') !== '.ugt_auth') args.push(`--authfile=${v('honk-authfile')}`);
+  if (v('honk-config') !== '.conf') args.push(`--config=${v('honk-config')}`);
+  if (v('honk-auth') !== '.auth') args.push(`--auth=${v('honk-auth')}`);
+  if (v('honk-output_dir') !== 'output') args.push(`--output_dir=${v('honk-output_dir')}`);
+  if (v('honk-reports_dir') !== 'reports') args.push(`--reports_dir=${v('honk-reports_dir')}`);
+  if (c('honk-m365')) args.push('--m365');
+  if (c('honk-entraid')) args.push('--entraid');
+  if (c('honk-azure')) args.push('--azure');
+  if (c('honk-mde')) args.push('--mde');
+  if (c('honk-force_repull')) args.push('--force_repull');
+  if (c('honk-dry_run')) args.push('--dry_run');
+  if (c('honk-insecure')) args.push('--insecure');
+  if (c('honk-debug')) args.push('--debug');
+  if (v('honk-encryption_pw')) args.push(`--encryption_pw=${v('honk-encryption_pw')}`);
+
+  document.getElementById('collect-run-btn').disabled = true;
+  document.getElementById('collect-stop-btn').disabled = false;
+
+  streamCommand('honk', args, 'collect-output', () => {
+    document.getElementById('collect-run-btn').disabled = false;
+    document.getElementById('collect-stop-btn').disabled = true;
+  });
+}
+
+function stopCollect() {
+  const taskId = panelTasks['collect'];
+  if (taskId) {
+    fetch(`/api/stop/${taskId}`, {method: 'POST'});
+  }
+  if (panelTasks._collectES) {
+    panelTasks._collectES.close();
+  }
+  hideInputBar('collect');
+  document.getElementById('collect-run-btn').disabled = false;
+  document.getElementById('collect-stop-btn').disabled = true;
+}
+
+// ---- Init ----
+document.addEventListener('DOMContentLoaded', () => {
+  loadConf();
+});
+</script>
+</body>
+</html>

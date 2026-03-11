@@ -995,3 +995,200 @@ class M365DataDumper(DataDumper):
 
     dump_ual._manages_own_progress = True
 
+    async def dump_ual_graph(self):
+        """Collect the Unified Audit Log via the Microsoft Graph API.
+
+        Uses the /security/auditLog/queries endpoint (beta) which provides an
+        async query model: create query, poll for completion, fetch paginated results.
+
+        This is an alternative to dump_ual which uses the Exchange Online PowerShell cmdlet.
+        Requires AuditLogsQuery.Read.All permission. Not available in GCC/GCC-High/DoD.
+
+        Reference: https://learn.microsoft.com/en-us/graph/api/resources/security-auditlogquery
+        """
+        if self.gcc or self.gcc_high:
+            self.logger.error("Graph API audit log queries are not available in GCC/GCC-High environments. Use ual (EXO cmdlet) instead.")
+            return
+
+        statefile = f'{self.output_dir}{os.path.sep}.ual_graph_state'
+
+        # Determine time range
+        end = get_end_time_yesterday()
+        start = end - timedelta(days=364)
+
+        if self.date_range:
+            self.logger.debug(f'Graph UAL using specified date range: {self.date_start} to {self.date_end}')
+            start = datetime.strptime(self.date_start, "%Y-%m-%d")
+            end = datetime.strptime(self.date_end, "%Y-%m-%d")
+
+        # Load save state
+        saved_end = load_state(statefile)
+        if saved_end:
+            start = max(saved_end, start)
+            self.logger.info(f"Resuming Graph UAL collection from {start}")
+
+        total_days = (end - start).days
+        if total_days <= 0:
+            self.logger.info("Graph UAL: no time range to collect")
+            return
+
+        # Build filter parameters from config
+        filters = {}
+        if self.ual_record_type:
+            filters['recordTypeFilters'] = [r.strip() for r in self.ual_record_type.split(',')]
+        if self.ual_operations:
+            filters['operationFilters'] = [o.strip() for o in self.ual_operations.split(',')]
+        if self.ual_user_ids:
+            filters['userPrincipalNameFilters'] = [u.strip() for u in self.ual_user_ids.split(',')]
+        if self.ual_free_text:
+            filters['keywordFilter'] = self.ual_free_text
+        if self.ual_ip_addresses:
+            filters['ipAddressFilters'] = [ip.strip() for ip in self.ual_ip_addresses.split(',')]
+        if self.ual_object_ids:
+            filters['objectIdFilters'] = [o.strip() for o in self.ual_object_ids.split(',')]
+        if filters:
+            self.logger.info(f"Graph UAL filters active: {filters}")
+
+        # Progress bar
+        pm = get_progress_manager()
+        bar = None
+        bar_name = "m365_ual_graph"
+        if pm:
+            bar = pm.create_time_bar(bar_name, total_days, desc=f"{'Collecting UAL (Graph)':<35}")
+            if bar:
+                bar.bar_format = "{desc} |{bar}| {percentage:3.0f}% | day {n_fmt}/{total_fmt} | elapsed {elapsed} | {postfix}"
+
+        total_records = 0
+        ual_start_time = time.perf_counter()
+        current = start
+
+        try:
+            while current < end:
+                day_end = min(current + timedelta(days=1), end)
+                self.ensure_token()
+
+                try:
+                    query_id = await self._graph_ual_create_query(current, day_end, filters)
+                    if not query_id:
+                        current = day_end
+                        if bar:
+                            bar.update(1)
+                        continue
+
+                    succeeded = await self._graph_ual_poll_query(query_id)
+                    if not succeeded:
+                        self.logger.warning(f"Graph UAL query failed for {current.date()}, skipping")
+                        current = day_end
+                        if bar:
+                            bar.update(1)
+                        continue
+
+                    day_records = await self._graph_ual_fetch_records(query_id, current)
+                    total_records += day_records
+
+                    save_state(statefile, day_end)
+
+                    elapsed = time.perf_counter() - ual_start_time
+                    rate = int(total_records / elapsed * 3600) if elapsed > 0 else 0
+                    if bar:
+                        bar.update(1)
+                        bar.set_postfix_str(f"{total_records} logs | {rate} logs/hr")
+
+                except Exception as e:
+                    self.logger.error(f"Graph UAL error for {current.date()}: {e}")
+                    self.logger.debug("Graph UAL error details", exc_info=True)
+
+                current = day_end
+        finally:
+            if bar:
+                remaining = total_days - bar.n
+                if remaining > 0:
+                    bar.update(remaining)
+            if pm:
+                pm.complete_task(bar_name)
+
+        self.logger.info(f"Finished Graph UAL collection. Total records: {total_records}")
+
+    dump_ual_graph._manages_own_progress = True
+
+    async def _graph_ual_create_query(self, start, end, filters):
+        """Create a Graph API audit log query for a time range.
+
+        Returns the query ID on success, or None on failure.
+        """
+        url = f"{self.graph_url}/beta/security/auditLog/queries"
+        header = {
+            'Authorization': f'{self.app_auth["token_type"]} {self.app_auth["access_token"]}',
+            'Content-Type': 'application/json'
+        }
+
+        body = {
+            "displayName": f"goosey_ual_{start.strftime('%Y%m%d')}_{end.strftime('%Y%m%d')}",
+            "filterStartDateTime": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "filterEndDateTime": end.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        body.update(filters)
+
+        async with self.ahsession.post(url, headers=header, json=body, timeout=120) as r:
+            if r.status == 201:
+                result = await r.json()
+                return result.get("id")
+            else:
+                result = await r.text()
+                self.logger.error(f"Failed to create Graph UAL query ({r.status}): {result}")
+                return None
+
+    async def _graph_ual_poll_query(self, query_id, max_wait=600, poll_interval=5):
+        """Poll a Graph API audit log query until it completes.
+
+        Returns True if the query succeeded, False otherwise.
+        """
+        url = f"{self.graph_url}/beta/security/auditLog/queries/{query_id}"
+        elapsed = 0
+        while elapsed < max_wait:
+            self.ensure_token()
+            header = {'Authorization': f'{self.app_auth["token_type"]} {self.app_auth["access_token"]}'}
+            async with self.ahsession.get(url, headers=header, timeout=60) as r:
+                result = await r.json()
+                status = result.get("status", "unknown")
+                if status == "succeeded":
+                    return True
+                elif status in ("failed", "cancelled"):
+                    self.logger.error(f"Graph UAL query {query_id} status: {status}")
+                    return False
+            await asyncio.sleep(poll_interval)
+            elapsed += poll_interval
+
+        self.logger.error(f"Graph UAL query {query_id} timed out after {max_wait}s")
+        return False
+
+    async def _graph_ual_fetch_records(self, query_id, day_start):
+        """Fetch all paginated records from a completed Graph API audit log query.
+
+        Returns the number of records fetched.
+        """
+        url = f"{self.graph_url}/beta/security/auditLog/queries/{query_id}/records"
+        outfile = os.path.join(self.output_dir, f"ual_graph_{day_start.strftime('%Y-%m-%d')}.json")
+        record_count = 0
+
+        while url:
+            self.ensure_token()
+            header = {'Authorization': f'{self.app_auth["token_type"]} {self.app_auth["access_token"]}'}
+            async with self.ahsession.get(url, headers=header, timeout=120) as r:
+                if r.status != 200:
+                    err_text = await r.text()
+                    self.logger.error(f"Graph UAL fetch error ({r.status}): {err_text}")
+                    break
+                result = await r.json()
+                if 'value' in result:
+                    with open(outfile, 'a', encoding='utf-8') as f:
+                        for record in result['value']:
+                            f.write(json.dumps(record) + "\n")
+                            record_count += 1
+                url = result.get('@odata.nextLink')
+
+        if record_count == 0 and os.path.isfile(outfile) and os.stat(outfile).st_size == 0:
+            os.remove(outfile)
+
+        return record_count
+

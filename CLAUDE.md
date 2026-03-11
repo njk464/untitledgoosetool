@@ -25,12 +25,12 @@ Requires Python 3.9–3.13 (enforced by setup.py). Python 3.12+ is recommended f
 The `goosey` entry point (defined in `setup.py`) exposes these commands via the `fire` library:
 
 ```sh
+goosey setup         # Create/delete Azure app registration and service principal
 goosey conf          # Generate .conf and .auth configuration files interactively
-goosey auth          # Authenticate (MSAL OAuth, app credentials, token management)
-goosey honk          # Run data collection against configured cloud platforms
-goosey autohonk      # Loop: re-authenticate then honk continuously
-goosey csv           # Convert GUID values in output files to human-readable text
+goosey honk          # Authenticate + run data collection (auth is automatic)
+goosey autohonk      # Alias for honk (backwards compatibility)
 goosey d4iot         # Authenticate for Defender for IoT separately
+goosey web           # Launch browser-based UI
 goosey --version     # Display version
 ```
 

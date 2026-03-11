@@ -152,13 +152,12 @@ def genconf(outpath_auth=".auth",
     for param in docstring.params:
         docstring_params[param.arg_name] = param.description
 
-    # check if authfile exists.
-    if not ((args["insecure"] and os.path.isfile(outpath_auth)) or \
-            os.path.isfile(outpath_auth + ".aes")):
+    # check if authfile already exists (plaintext or encrypted)
+    auth_exists = os.path.isfile(outpath_auth) or os.path.isfile(outpath_auth + ".aes")
+    if not auth_exists:
         # If auth id not provided prompt for it
         if not args["auth_appid"]:
             args["auth_appid"] = input("Enter the App ID for the application: ")
-
 
         # Check if appid is present. If so get the client secret by prompting
         if args["auth_appid"] and not args["auth_clientsecret"]:
@@ -172,7 +171,7 @@ def genconf(outpath_auth=".auth",
         write_auth(outpath_auth, auth_s, logger=logger, encryption_pw=encryption_pw, insecure=args["insecure"])
         logger.debug("auth config created")
     else:
-        logger.debug("Auth file already exists")
+        logger.info("Auth file already exists, skipping credentials prompts.")
 
     if not new:
         old_config = configparser.ConfigParser()

@@ -238,6 +238,7 @@ def honk(authfile=".ugt_auth",
          m365=False,
          mde=False,
          force_repull=False,
+         insecure=False,
          encryption_pw=None,
          # [config] overrides
          tenant=None,
@@ -263,6 +264,9 @@ def honk(authfile=".ugt_auth",
     """
     Untitled Goose Tool Information Gathering
 
+    Authenticates automatically before collecting. Token refresh is handled
+    mid-run by TokenManager so long collections complete without interruption.
+
     Args:
         authfile: File to store the authentication tokens and cookies
         config: Path to config file
@@ -276,7 +280,8 @@ def honk(authfile=".ugt_auth",
         m365: Set all of the M365 calls to true
         mde: Set all of the MDE calls to true
         force_repull: Ignore save states for snapshot (non-time-based) dumpers and re-pull all data
-        encryption_pw: Password for the auth file encryption. SHOULD ONLY BE USED WITH AUTOHONK
+        insecure: Disable secure authentication handling (file encryption)
+        encryption_pw: Password for the auth file encryption (prompted if not provided)
         tenant: Override tenant ID from .conf
         gcc: Override GCC setting (true/false)
         gcc_high: Override GCC High setting (true/false)
@@ -304,7 +309,25 @@ def honk(authfile=".ugt_auth",
 
     logger = setup_logger(__name__, args.debug)
 
-    auth_un_pw, auth = get_authfile(authfile=args.auth, ugt_authfile=args.authfile, logger=logger, encryption_pw=encryption_pw)
+    # Prompt for encryption password if needed and not provided
+    if not insecure and encryption_pw is None:
+        dir_path = os.path.dirname(os.path.realpath(auth))
+        encrypted_auth = os.path.join(dir_path, auth + '.aes')
+        if os.path.isfile(encrypted_auth):
+            encryption_pw = getpass.getpass("Please type the password for file encryption: ")
+            args.encryption_pw = encryption_pw
+
+    # Authenticate to all endpoints before collecting
+    gooseyauth(
+        authfile=authfile,
+        config=config,
+        auth=auth,
+        debug=debug,
+        insecure=insecure,
+        encryption_pw=encryption_pw,
+    )
+
+    auth_un_pw, auth_tokens = get_authfile(authfile=auth, ugt_authfile=authfile, logger=logger, encryption_pw=encryption_pw)
 
     check_output_dir(args.output_dir, logger)
     check_output_dir(args.reports_dir, logger)
@@ -319,73 +342,21 @@ def honk(authfile=".ugt_auth",
         print("Goosey beginning to honk. Detailed logs in debug.log and error.log.\n")
     seconds = time.perf_counter()
     try:
-        asyncio.run(run(args, config, auth, init_sections, auth_un_pw=auth_un_pw))
+        asyncio.run(run(args, config, auth_tokens, init_sections, auth_un_pw=auth_un_pw))
     except RuntimeError as e:
         sys.exit(1)
     elapsed = time.perf_counter() - seconds
     logger.info("Goosey executed in {0:0.2f} seconds.".format(elapsed))
 
-def autohonk(authfile=".ugt_auth",
-         config=".conf",
-         auth=".auth",
-         output_dir="output",
-         reports_dir="reports",
-         debug=False,
-         azure=False,
-         entraid=False,
-         m365=False,
-         mde=False,
-         force_repull=False,
-         insecure=False,
-         **kwargs):
+def autohonk(**kwargs):
     """
-    Untitled Goose Tool Information Gathering. With auto authentication!
-    Authenticates once, then runs collection to completion with automatic token refresh.
+    Untitled Goose Tool Information Gathering (alias for honk).
 
-    Args:
-        authfile: File to store the authentication tokens and cookies
-        config: Path to config file
-        auth: File to store the credentials used for authentication
-        output_dir: Directory for storing the results
-        reports_dir: Directory for storing debugging/informational logs
-        debug: Enable debug logging
-        azure: Set all of the Azure calls to true
-        entraid: Set all of the Entra ID calls to true
-        m365: Set all of the M365 calls to true
-        mde: Set all of the MDE calls to true
-        insecure: Disable secure authentication handling (file encryption)
+    This is a backwards-compatible alias. Authentication is now built into honk
+    directly, so there is no difference between honk and autohonk.
 
-    All other keyword arguments (tenant, gcc, date_start, ual_threshold, etc.)
-    are passed through to honk() as CLI overrides for .conf values.
+    All arguments are passed through to honk(). See 'goosey honk --help' for options.
     """
-    encryption_pw = None
-    if not insecure:
-        encryption_pw = getpass.getpass("Please type the password for file encryption: ")
-
-    # Authenticate once
-    gooseyauth(
-        authfile=authfile,
-        config=config,
-        auth=auth,
-        debug=debug,
-        encryption_pw=encryption_pw,
-    )
-
-    # Run collection once — TokenManager handles mid-run token refresh
-    honk(
-        authfile=authfile,
-        config=config,
-        auth=auth,
-        output_dir=output_dir,
-        reports_dir=reports_dir,
-        debug=debug,
-        azure=azure,
-        entraid=entraid,
-        m365=m365,
-        mde=mde,
-        force_repull=force_repull,
-        encryption_pw=encryption_pw,
-        **kwargs,
-    )
+    honk(**kwargs)
 
 

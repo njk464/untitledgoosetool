@@ -3,7 +3,7 @@
 
 """Untitled Goose Tool: Main!
 Entry point module. Maps CLI subcommands to functions via Google's python-fire library.
-Commands: auth, honk, autohonk, conf, csv, d4iot, version.
+Commands: honk, autohonk, conf, d4iot, setup, web, version.
 """
 
 import argparse
@@ -11,11 +11,11 @@ import sys
 from colored import stylize, attr, fg
 import fire
 
-from goosey.auth import auth
 from goosey.honk import honk, autohonk
 from goosey.conf import genconf
-from goosey.csv import goosey_csv
 from goosey.d4iot import d4iot
+from goosey.setup_app import setup
+from goosey.web import web
 import goosey
 
 
@@ -27,12 +27,12 @@ def version():
 
 
 def main():
-    fire.Fire({"auth": auth,
-               "honk": honk,
+    fire.Fire({"honk": honk,
                "autohonk": autohonk,
                "conf": genconf,
                "d4iot": d4iot,
-               "csv": goosey_csv,
+               "setup": setup,
+               "web": web,
                "--version": version})
 if __name__ == "__main__":
     main()
