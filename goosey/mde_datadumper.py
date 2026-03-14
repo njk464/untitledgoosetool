@@ -143,8 +143,17 @@ class MDEDataDumper(DataDumper):
         return data
 
     async def dump_advanced_hunting_alerts_incidents(self) -> None:
-        """Dumps the results from incidents and alerts.
-        API Reference: https://learn.microsoft.com/en-us/microsoft-365/security/defender-endpoint/run-advanced-query-api?view=o365-worldwide
+        """Dumps alerts, incidents, email, cloud app, and behavior events from Defender XDR.
+
+        Queries unified Defender XDR tables via api/advancedhunting/run using the
+        security_api token (app_auth2). Tables include:
+        - AlertInfo, AlertEvidence: MDE alert and evidence data
+        - EmailEvents, EmailAttachmentInfo, EmailUrlInfo, EmailPostDeliveryEvents:
+          Defender for Office 365 email telemetry
+        - CloudAppEvents: Microsoft Defender for Cloud Apps activity
+        - BehaviorInfo: Behavioral detections across Defender XDR
+
+        API Reference: https://learn.microsoft.com/en-us/microsoft-365/security/defender/advanced-hunting-overview
         """
 
         # default end time. Now
@@ -158,7 +167,18 @@ class MDEDataDumper(DataDumper):
             start = utc.localize(datetime.strptime(self.date_start,"%Y-%m-%d"))
             end = utc.localize(datetime.strptime(self.date_end,"%Y-%m-%d"))
 
-        tables = ['AlertInfo', 'AlertEvidence']
+        tables = [
+            'AlertInfo',
+            'AlertEvidence',
+            # Defender XDR unified tables (email, cloud app, and behavior telemetry)
+            # These require the security_api token (api/advancedhunting/run endpoint)
+            'EmailEvents',
+            'EmailAttachmentInfo',
+            'EmailUrlInfo',
+            'EmailPostDeliveryEvents',
+            'CloudAppEvents',
+            'BehaviorInfo',
+        ]
 
         # Collect table info for shared progress bar
         table_tasks = []
@@ -210,8 +230,9 @@ class MDEDataDumper(DataDumper):
     async def dump_advanced_hunting_query(self) -> None:
         """Collect MDE advanced hunting data for device telemetry tables.
 
-        Queries 7 core device tables (Events, Logon, Registry, Process, Network, File, ImageLoad)
-        via the MDE-specific advanced queries API (api/advancedqueries/run).
+        Queries 9 device tables (Events, Logon, Registry, Process, Network, File, ImageLoad,
+        DeviceInfo, DeviceNetworkInfo) via the MDE-specific advanced queries API
+        (api/advancedqueries/run).
 
         Supports two modes controlled by mde_query_mode in .conf:
         - 'table': One task per table, queries all machines globally.
@@ -234,7 +255,18 @@ class MDEDataDumper(DataDumper):
             start = utc.localize(datetime.strptime(self.date_start,"%Y-%m-%d"))
             end = utc.localize(datetime.strptime(self.date_end,"%Y-%m-%d"))
 
-        tables = ['DeviceEvents', 'DeviceLogonEvents', 'DeviceRegistryEvents', 'DeviceProcessEvents', 'DeviceNetworkEvents', 'DeviceFileEvents', 'DeviceImageLoadEvents']
+        tables = [
+            'DeviceEvents',
+            'DeviceLogonEvents',
+            'DeviceRegistryEvents',
+            'DeviceProcessEvents',
+            'DeviceNetworkEvents',
+            'DeviceFileEvents',
+            'DeviceImageLoadEvents',
+            # Device inventory and network interface tables (MDE-specific, securitycenter_api)
+            'DeviceInfo',
+            'DeviceNetworkInfo',
+        ]
 
         # In 'table' mode: iterate ("", table) pairs — no machine filter.
         # In 'machine' mode: iterate (machine_id, table) pairs — filter by DeviceId.
