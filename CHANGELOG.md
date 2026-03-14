@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+### Added
+- Entra ID: administrative units and cross-tenant access policy endpoints for forensic coverage
+- MDE: 8 new advanced hunting tables (DeviceInfo, DeviceNetworkInfo, Defender XDR tables)
+- Azure: VNet flow logs collection (`dump_vnet_flow_logs`) with NSG flow log deprecation notice
+
 ## [2.1.0] - Enter the honk - 2024-02-19
 ### Added
 - Added support for python 3.13
