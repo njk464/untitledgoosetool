@@ -1073,9 +1073,119 @@ class AzureDataDumper(DataDumper):
 
     async def dump_nsg_flow_logs(self):
         """
-        Dump insights network security group flow events
+        Dump insights network security group flow events from blob storage.
+
+        NOTE: NSG flow logs are deprecated. No new NSG flow log resources can be created after
+        June 2025, and the feature will be fully retired September 2027. Use dump_vnet_flow_logs
+        for VNet flow logs (the recommended replacement). This method is kept for backwards
+        compatibility with environments that still have legacy NSG flow log data in blob storage.
+        See: https://learn.microsoft.com/en-us/azure/network-watcher/nsg-flow-logs-overview
         """
         await self.auxillary_storage_log_pull("insights-logs-networksecuritygroupflowevent", "nsg_flow")
+
+    async def dump_vnet_flow_logs(self):
+        """
+        Dump VNet flow logs from Log Analytics workspaces via KQL query against NTANetAnalytics table.
+
+        VNet flow logs are the replacement for deprecated NSG flow logs (deprecated June 2025,
+        retired September 2027). VNet flow log data is stored in the NTANetAnalytics table
+        (or NTANetAnalytics_CL for custom log destinations) in Log Analytics workspaces.
+
+        Queries all Log Analytics workspaces across all subscriptions for NTANetAnalytics
+        and NTANetAnalytics_CL tables, using the same incremental save-state pattern as
+        dump_log_analytic_workspaces.
+
+        See: https://learn.microsoft.com/en-us/azure/network-watcher/vnet-flow-logs-overview
+        """
+        # @decision DEC-AZURE-VNET-001
+        # @title Query NTANetAnalytics table for VNet flow logs via LAW KQL
+        # @status accepted
+        # @rationale VNet flow logs write to Log Analytics via the NTANetAnalytics table.
+        # Unlike legacy NSG flow logs (blob storage), VNet flow logs are LAW-native.
+        # We discover workspaces the same way as dump_log_analytic_workspaces (reusing the
+        # workspaces.json artifact if already present from that run) and target only the
+        # VNet flow log tables rather than all tables. This avoids re-listing workspaces
+        # from the API when the artifact already exists, and scopes the query to minimize
+        # cost and latency.
+
+        # VNet flow log tables: NTANetAnalytics (standard) and NTANetAnalytics_CL (custom)
+        vnet_flow_tables = ["NTANetAnalytics", "NTANetAnalytics_CL"]
+
+        end = utc.localize(datetime.now())
+        # VNet flow logs retention: up to 2 years by default; use 2 years as default window
+        start = end - timedelta(days=365 * 2)
+
+        if self.date_range:
+            self.logger.debug(f'VNet flow logs dump using specified date range: {self.date_start} to {self.date_end}')
+            start = dateutil.parser.parse(self.date_start).replace(tzinfo=utc)
+            end = dateutil.parser.parse(self.date_end).replace(tzinfo=utc)
+
+        tasks = []
+        for subscriptionId in self.subscription_id_list:
+            url = f"{self.endpoints['resource_manager']}/subscriptions/{subscriptionId}/providers/Microsoft.OperationalInsights/"
+            output_dir = os.path.join(self.output_dir, subscriptionId, "vnet_flow_logs")
+            check_output_dir(output_dir, self.logger)
+
+            # Reuse workspaces.json from log_analytics_workspace output if available,
+            # otherwise fetch workspace list from ARM API
+            law_output_dir = os.path.join(self.output_dir, subscriptionId, "log_analytics_workspace")
+            workspaces_file = os.path.join(law_output_dir, "workspaces.json")
+            if not os.path.isfile(workspaces_file):
+                # Fall back to fetching workspaces for this subscription
+                check_output_dir(law_output_dir, self.logger)
+                call_object = [url, self.app_auth, self.logger, law_output_dir, self.get_session()]
+                await helper_single_object("workspaces?api-version=2023-09-01", call_object, self.failurefile)
+
+            if not os.path.isfile(workspaces_file):
+                self.logger.debug(f"No Log Analytics workspaces found for subscription {subscriptionId}, skipping VNet flow log collection")
+                continue
+
+            with open(workspaces_file, "r") as f:
+                for line in f:
+                    workspace_dict = json.loads(line)
+                    workspace_name = workspace_dict["name"]
+                    workspace_id = workspace_dict["id"]
+                    query_url = f"{self.endpoints['log_analytics_api']}/v1{workspace_id}/query"
+
+                    # Check which VNet flow log tables exist in this workspace
+                    self.logger.debug(f"Checking VNet flow log tables in workspace {workspace_name}")
+                    summary, err, _, _ = await run_kql_query(
+                        "search \"*\"", start, end, None,
+                        query_url, self.loganalytics_app_auth,
+                        self.logger, self.ahsession, summarize=True
+                    )
+
+                    if err or not summary:
+                        self.logger.debug(f"Could not enumerate tables in workspace {workspace_name}, skipping")
+                        continue
+
+                    available_tables = {row.get("$table") for row in summary if "$table" in row}
+                    workspace_log_dir = os.path.join(output_dir, workspace_name)
+                    check_output_dir(workspace_log_dir, self.logger)
+
+                    for table in vnet_flow_tables:
+                        if table not in available_tables:
+                            self.logger.debug(f"Table {table} not present in workspace {workspace_name}, skipping")
+                            continue
+
+                        self.logger.debug(f"Scheduling VNet flow log dump for table {table} in workspace {workspace_name}")
+                        statefile = os.path.join(workspace_log_dir, f".{table}.savestate")
+                        outfile = os.path.join(workspace_log_dir, f"{table}.json")
+                        saved_end = load_state(statefile)
+                        table_start = start
+                        table_end = end
+                        if saved_end:
+                            table_start = max(saved_end, table_start)
+                        caller_name = asyncio.current_task().get_name()
+                        tasks.append(asyncio.create_task(
+                            self._dump_table(table, table_start, table_end, query_url, statefile=statefile, outfile=outfile),
+                            name=f"{caller_name}_{workspace_name}_{table}"
+                        ))
+
+        if tasks:
+            await asyncio.gather(*tasks)
+        else:
+            self.logger.info("No VNet flow log tables (NTANetAnalytics / NTANetAnalytics_CL) found across any workspace")
 
     async def dump_bastion_logs(self):
         """
