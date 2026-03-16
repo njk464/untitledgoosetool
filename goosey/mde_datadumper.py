@@ -849,6 +849,68 @@ class MDEDataDumper(DataDumper):
         else:
             self.logger.info("No machines found for alert collection.")
 
+    async def dump_missing_kbs(self) -> None:
+        """Collect missing KB patches per machine from the MDE REST API.
+
+        Iterates over all known machines and fetches the list of missing
+        security updates (KBs) for each one via GET /api/machines/{id}/getmissingkbs.
+        Uses a semaphore (machine_api_semaphore) to respect the MDE rate limit of
+        ~100 calls/min, matching the pattern used by dump_machine_alerts.
+
+        Machine list is sourced from check_machines(), which re-uses a cached
+        api_machines.json if dump_machines has already run in this session.
+        Per-machine save state is stored alongside output files so interrupted
+        runs resume from the last completed machine.
+
+        Output: {output_dir}/mde/missing_kbs/<hostname>_<machine_id>_missing_kbs.json
+                One JSONL file per machine; machines with zero results produce no file.
+
+        @decision DEC-MDE-MISSING-KBS-001
+        @title Per-machine semaphore-limited fetching for missing KBs
+        @status accepted
+        @rationale The /api/machines/{id}/getmissingkbs endpoint is a per-machine call
+          with the same MDE rate-limit characteristics as /api/machines/{id}/alerts.
+          Reusing check_machines(), machine_api_semaphore, and _fetch_paginated_endpoint
+          keeps the code consistent with dump_machine_alerts and avoids duplicating
+          rate-limit and pagination logic.
+        """
+        self.ensure_token()
+        data = await self.check_machines()
+        machine_ids = list(findkeys(data, 'id'))
+        machine_names = list(findkeys(data, 'computerDnsName'))
+        id_to_name = dict(zip(machine_ids, machine_names))
+
+        missing_kbs_dir = os.path.join(self.output_dir, 'missing_kbs')
+        check_output_dir(missing_kbs_dir, self.logger)
+
+        async def _fetch_machine_missing_kbs(machine_id):
+            hostname = id_to_name.get(machine_id, 'unknown')
+            safe_hostname = hostname.replace('/', '_').replace('\\', '_')
+            outfile = os.path.join(missing_kbs_dir, f"{safe_hostname}_{machine_id}_missing_kbs.json")
+            statefile = os.path.join(missing_kbs_dir, f".{machine_id}.savestate")
+
+            # Skip if already completed (savestate exists and outfile exists)
+            if os.path.isfile(statefile) and os.path.isfile(outfile):
+                self.logger.debug(f"Skipping machine {hostname} ({machine_id}) - missing KBs already collected.")
+                return
+
+            url = f"{self.mde_url}api/machines/{machine_id}/getmissingkbs"
+            async with self.machine_api_semaphore:
+                count = await self._fetch_paginated_endpoint(url, outfile, statefile)
+                if count > 0:
+                    self.logger.debug(f"Collected {count} missing KBs for {hostname} ({machine_id})")
+                elif os.path.isfile(statefile):
+                    # Mark completion even when no KBs are missing (no output file written)
+                    pass
+
+        tasks = [asyncio.create_task(_fetch_machine_missing_kbs(mid), name=f"missing_kbs_{mid}") for mid in machine_ids]
+        if tasks:
+            self.logger.info(f"Collecting missing KBs for {len(tasks)} machines...")
+            await asyncio.gather(*tasks)
+            self.logger.info("Missing KBs collection complete.")
+        else:
+            self.logger.info("No machines found for missing KB collection.")
+
     async def _fetch_portal_timeline(self, url, outfile, statefile, headers,
                                      method="GET", json_body=None, max_pages=500):
         """Fetch timeline data from the M365 Defender portal proxy API.
