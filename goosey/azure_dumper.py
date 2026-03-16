@@ -1546,3 +1546,333 @@ class AzureDataDumper(DataDumper):
 
             # Mark this subscription's configs as complete
             self.write_savestate(config_state_name)
+
+    async def dump_resource_graph_changes(self) -> None:
+        """Dump Azure Resource Graph resource change history via cross-subscription POST query.
+
+        Queries the Resource Graph API for resource changes in the last 14 days using the
+        resourcechanges table. This is a cross-subscription query — Resource Graph automatically
+        spans all subscriptions the service principal has access to, so no per-subscription
+        loop is needed.
+
+        Pagination is handled via $skipToken in the response body (not a nextLink URL).
+        The full skip token is passed back in the next request body's options field.
+
+        Output: {output_dir}/resource_graph_changes.json (JSONL format)
+        API: POST /providers/Microsoft.ResourceGraph/resources?api-version=2022-10-01
+
+        @decision DEC-AZURE-RG-001
+        @title Use Resource Graph cross-subscription POST for change history
+        @status accepted
+        @rationale Resource Graph queries span all subscriptions the SP has access to in a
+        single request, making per-subscription loops unnecessary and inefficient. The
+        resourcechanges table is only accessible via Resource Graph (not per-subscription ARM
+        APIs). Pagination uses $skipToken in the response body (not a nextLink URL), which
+        differs from most ARM endpoints — handled inline rather than via get_nextlink().
+        """
+        if self.check_savestate("resource_graph_changes"):
+            return
+
+        header = self._make_auth_header()
+        outfile = os.path.join(self.output_dir, "resource_graph_changes.json")
+
+        url = self._get_mgmt_url(
+            "/providers/Microsoft.ResourceGraph/resources?api-version=2022-10-01"
+        )
+
+        query_body = {
+            "query": (
+                "resourcechanges "
+                "| where properties.changeAttributes.timestamp > ago(14d) "
+                "| order by properties.changeAttributes.timestamp desc"
+            ),
+            "options": {"resultFormat": "objectArray"},
+        }
+
+        self.logger.info("Getting Azure Resource Graph change history (last 14 days)...")
+        record_count = 0
+        skip_token = None
+
+        while True:
+            body = dict(query_body)
+            if skip_token:
+                body["options"] = dict(body["options"])
+                body["options"]["$skipToken"] = skip_token
+
+            async with self.ahsession.request(
+                'POST', url, headers=header, json=body, ssl=False
+            ) as r:
+                result = await r.json()
+
+            if 'error' in result:
+                err = result['error']
+                if err.get('code') == 'ExpiredAuthenticationToken':
+                    self.logger.error(
+                        f"Authentication token expired: {err.get('message')} — please re-auth."
+                    )
+                    return
+                self.logger.error(
+                    f"Error fetching resource graph changes: "
+                    f"{err.get('code')} — {err.get('message')}"
+                )
+                break
+
+            entries = result.get('data', [])
+            if entries:
+                with open(outfile, 'a+', encoding='utf-8') as f:
+                    for entry in entries:
+                        f.write(json.dumps(entry) + "\n")
+                    f.flush()
+                    os.fsync(f)
+                record_count += len(entries)
+
+            # Resource Graph pagination: $skipToken lives inside result_truncated / skipToken
+            skip_token = result.get('$skipToken') or result.get('skipToken')
+            if not skip_token:
+                break
+
+            await asyncio.sleep(0)  # yield to event loop
+
+        self.logger.info(
+            f"Finished getting resource graph changes ({record_count} records)."
+        )
+        self.write_savestate("resource_graph_changes")
+
+    async def dump_deployment_history(self) -> None:
+        """Dump ARM deployment history for all resource groups in each subscription.
+
+        For each subscription, first enumerates resource groups via:
+          GET /subscriptions/{id}/resourcegroups?api-version=2021-04-01
+        Then for each resource group fetches deployments via:
+          GET /subscriptions/{id}/resourcegroups/{rg}/providers/Microsoft.Resources/deployments
+              ?api-version=2021-04-01
+
+        All deployments across all resource groups are written to a single file per
+        subscription. Pagination uses 'nextLink' in the response body (standard ARM pattern).
+
+        Output: {output_dir}/{subscriptionId}/deployment_history.json (JSONL format)
+
+        @decision DEC-AZURE-DEPLOY-001
+        @title Enumerate resource groups then query deployments per RG
+        @status accepted
+        @rationale ARM has no cross-RG deployment list endpoint — deployments must be
+        queried per resource group. We enumerate RGs first (cheap list call), then fan out.
+        All RG deployments go into a single per-subscription file to keep the output layout
+        consistent with other per-subscription artifacts (rbac_role_assignments, etc.).
+        """
+        if self.check_savestate("deployment_history"):
+            return
+
+        header = self._make_auth_header()
+
+        for subscriptionId in self.subscription_id_list:
+            self.logger.info(f"Getting deployment history from {subscriptionId}...")
+            sub_dir = os.path.join(self.output_dir, subscriptionId)
+            check_output_dir(sub_dir, self.logger)
+            outfile = os.path.join(sub_dir, "deployment_history.json")
+
+            # Step 1: enumerate resource groups
+            rg_url = self._get_mgmt_url(
+                f"/subscriptions/{subscriptionId}/resourcegroups?api-version=2021-04-01"
+            )
+            resource_groups = []
+            while rg_url:
+                async with self.ahsession.request(
+                    'GET', rg_url, headers=header, ssl=False
+                ) as r:
+                    rg_result = await r.json()
+
+                if 'error' in rg_result:
+                    err = rg_result['error']
+                    if err.get('code') == 'ExpiredAuthenticationToken':
+                        self.logger.error(
+                            f"Authentication token expired: {err.get('message')} — please re-auth."
+                        )
+                        return
+                    self.logger.error(
+                        f"Error enumerating resource groups for {subscriptionId}: "
+                        f"{err.get('code')} — {err.get('message')}"
+                    )
+                    break
+
+                for rg in rg_result.get('value', []):
+                    resource_groups.append(rg['name'])
+
+                rg_url = rg_result.get('nextLink')
+                await asyncio.sleep(0)  # yield to event loop
+
+            # Step 2: fetch deployments per resource group
+            record_count = 0
+            for rg_name in resource_groups:
+                deploy_url = self._get_mgmt_url(
+                    f"/subscriptions/{subscriptionId}/resourcegroups/{rg_name}"
+                    f"/providers/Microsoft.Resources/deployments?api-version=2021-04-01"
+                )
+
+                while deploy_url:
+                    async with self.ahsession.request(
+                        'GET', deploy_url, headers=header, ssl=False
+                    ) as r:
+                        deploy_result = await r.json()
+
+                    if 'error' in deploy_result:
+                        err = deploy_result['error']
+                        if err.get('code') == 'ExpiredAuthenticationToken':
+                            self.logger.error(
+                                f"Authentication token expired: {err.get('message')} — please re-auth."
+                            )
+                            return
+                        self.logger.error(
+                            f"Error fetching deployments for {subscriptionId}/{rg_name}: "
+                            f"{err.get('code')} — {err.get('message')}"
+                        )
+                        break
+
+                    entries = deploy_result.get('value', [])
+                    if entries:
+                        with open(outfile, 'a+', encoding='utf-8') as f:
+                            for entry in entries:
+                                f.write(json.dumps(entry) + "\n")
+                            f.flush()
+                            os.fsync(f)
+                        record_count += len(entries)
+
+                    deploy_url = deploy_result.get('nextLink')
+                    await asyncio.sleep(0)  # yield to event loop
+
+            self.logger.info(
+                f"Finished getting deployment history from {subscriptionId} "
+                f"({record_count} records across {len(resource_groups)} resource groups)."
+            )
+
+        self.write_savestate("deployment_history")
+
+    async def dump_vm_extensions(self) -> None:
+        """Dump VM extensions for all virtual machines across each subscription.
+
+        For each subscription, enumerates VMs by reading the existing vm_configs.json
+        artifact produced by _dump_vm_config() if available (avoids a redundant API call).
+        If the artifact is absent, falls back to listing VMs via the Azure SDK compute client.
+
+        For each VM, fetches extensions via:
+          GET /subscriptions/{id}/resourceGroups/{rg}/providers/Microsoft.Compute
+              /virtualMachines/{vm}/extensions?api-version=2024-03-01
+
+        All extensions across all VMs are written to a single file per subscription.
+
+        Output: {output_dir}/{subscriptionId}/vm_extensions.json (JSONL format)
+
+        @decision DEC-AZURE-VMEXT-001
+        @title Reuse vm_configs.json artifact to avoid redundant VM enumeration
+        @status accepted
+        @rationale _dump_vm_config() already enumerates every VM and writes vm_configs.json
+        with id fields containing the resource group and VM name. Parsing that artifact is
+        cheaper than calling the compute API again. We fall back to the SDK list_all() call
+        if the file is absent (e.g., dump_vm_extensions is run standalone without dump_configs).
+        The extension API is aiohttp-based (resource_manager token) to match the pattern used
+        by dump_rbac_role_assignments and dump_deployment_history.
+        """
+        if self.check_savestate("vm_extensions"):
+            return
+
+        header = self._make_auth_header()
+
+        for i in range(0, len(self.subscription_id_list)):
+            subscriptionId = self.subscription_id_list[i]
+            self.logger.info(f"Getting VM extensions from {subscriptionId}...")
+            sub_dir = os.path.join(self.output_dir, subscriptionId)
+            check_output_dir(sub_dir, self.logger)
+            outfile = os.path.join(sub_dir, "vm_extensions.json")
+
+            # Build list of (resource_group, vm_name) pairs
+            vm_list = []  # list of (resource_group, vm_name)
+
+            # Try to reuse existing vm_configs.json artifact
+            vm_configs_file = os.path.join(
+                self.output_dir, subscriptionId, 'azure_configs', 'vm_configs.json'
+            )
+            if os.path.isfile(vm_configs_file):
+                self.logger.debug(
+                    f"Reusing vm_configs.json for VM enumeration in {subscriptionId}"
+                )
+                with open(vm_configs_file, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            vm = json.loads(line)
+                            parts = vm.get('id', '').split('/')
+                            # ARM resource id: /subscriptions/.../resourceGroups/{rg}/providers/.../virtualMachines/{vm}
+                            if len(parts) >= 9:
+                                rg = parts[4]
+                                vm_name = parts[-1]
+                                vm_list.append((rg, vm_name))
+                        except (json.JSONDecodeError, IndexError):
+                            continue
+            else:
+                # Fall back to SDK enumeration
+                self.logger.debug(
+                    f"vm_configs.json not found; enumerating VMs via SDK for {subscriptionId}"
+                )
+                try:
+                    compute_client = self.compute_clients[i]
+                    for vm in compute_client.virtual_machines.list_all():
+                        parts = vm.id.split('/')
+                        if len(parts) >= 9:
+                            rg = parts[4]
+                            vm_name = parts[-1]
+                            vm_list.append((rg, vm_name))
+                        await asyncio.sleep(0)  # yield to event loop
+                except Exception as e:
+                    self.logger.error(
+                        f"Error enumerating VMs for {subscriptionId}: {str(e)}"
+                    )
+                    continue
+
+            # Fetch extensions for each VM
+            record_count = 0
+            for rg_name, vm_name in vm_list:
+                ext_url = self._get_mgmt_url(
+                    f"/subscriptions/{subscriptionId}/resourceGroups/{rg_name}"
+                    f"/providers/Microsoft.Compute/virtualMachines/{vm_name}"
+                    f"/extensions?api-version=2024-03-01"
+                )
+
+                async with self.ahsession.request(
+                    'GET', ext_url, headers=header, ssl=False
+                ) as r:
+                    result = await r.json()
+
+                if 'error' in result:
+                    err = result['error']
+                    if err.get('code') == 'ExpiredAuthenticationToken':
+                        self.logger.error(
+                            f"Authentication token expired: {err.get('message')} — please re-auth."
+                        )
+                        return
+                    # Non-fatal: VM may have no extensions or permissions may be scoped
+                    self.logger.debug(
+                        f"Error fetching extensions for VM {vm_name} in {rg_name}: "
+                        f"{err.get('code')} — {err.get('message')}"
+                    )
+                    await asyncio.sleep(0)
+                    continue
+
+                entries = result.get('value', [])
+                if entries:
+                    with open(outfile, 'a+', encoding='utf-8') as f:
+                        for entry in entries:
+                            f.write(json.dumps(entry) + "\n")
+                        f.flush()
+                        os.fsync(f)
+                    record_count += len(entries)
+
+                await asyncio.sleep(0)  # yield to event loop
+
+            self.logger.info(
+                f"Finished getting VM extensions from {subscriptionId} "
+                f"({record_count} extensions across {len(vm_list)} VMs)."
+            )
+
+        self.write_savestate("vm_extensions")
