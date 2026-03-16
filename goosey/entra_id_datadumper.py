@@ -566,6 +566,7 @@ class EntraIdDataDumper(DataDumper):
             helper_single_object("reports/getCredentialUserRegistrationCount", conf_call_object, self.failurefile, caller=caller_name),
             helper_single_object("reports/credentialUserRegistrationDetails", conf_call_object, self.failurefile, caller=caller_name),
             helper_single_object("reports/userCredentialUsageDetails", conf_call_object, self.failurefile, caller=caller_name),
+            helper_single_object("reports/authenticationMethods/userRegistrationDetails", conf_call_object, self.failurefile, caller=caller_name),
             helper_single_object('users', conf_call_object, self.failurefile, caller=caller_name),
             helper_single_object('contacts', conf_call_object, self.failurefile, caller=caller_name),
             helper_single_object('oauth2PermissionGrants', conf_call_object, self.failurefile, caller=caller_name),
