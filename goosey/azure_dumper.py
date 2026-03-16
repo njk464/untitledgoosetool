@@ -1430,6 +1430,266 @@ class AzureDataDumper(DataDumper):
 
         self.write_savestate("rbac_role_definitions")
 
+    async def _get_workspaces_for_subscription(self, subscriptionId: str) -> list:
+        """Return a list of workspace dicts for a subscription.
+
+        Reuses the workspaces.json artifact written by dump_log_analytic_workspaces
+        if it already exists (same pattern as dump_vnet_flow_logs), otherwise fetches
+        the workspace list from ARM and caches it for subsequent callers.
+
+        @decision DEC-SENTINEL-001
+        @title Reuse workspaces.json artifact to avoid redundant ARM list calls
+        @status accepted
+        @rationale dump_log_analytic_workspaces already writes workspaces.json.
+        All three Sentinel dump methods need the same workspace list.  Sharing the
+        artifact avoids N extra ARM API calls per sentinel method and keeps the
+        collection idempotent when multiple methods run concurrently.
+        """
+        law_output_dir = os.path.join(self.output_dir, subscriptionId, "log_analytics_workspace")
+        workspaces_file = os.path.join(law_output_dir, "workspaces.json")
+
+        if not os.path.isfile(workspaces_file):
+            check_output_dir(law_output_dir, self.logger)
+            url = (
+                f"{self.endpoints['resource_manager']}/subscriptions/{subscriptionId}"
+                f"/providers/Microsoft.OperationalInsights/"
+            )
+            call_object = [url, self.app_auth, self.logger, law_output_dir, self.get_session()]
+            await helper_single_object("workspaces?api-version=2023-09-01", call_object, self.failurefile)
+
+        if not os.path.isfile(workspaces_file):
+            self.logger.debug(
+                f"No Log Analytics workspaces found for subscription {subscriptionId}"
+            )
+            return []
+
+        workspaces = []
+        with open(workspaces_file, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    workspaces.append(json.loads(line))
+        return workspaces
+
+    async def _dump_sentinel_resource(
+        self,
+        subscriptionId: str,
+        api_path: str,
+        api_version: str,
+        output_name: str,
+    ) -> int:
+        """Fetch a Sentinel resource collection from all Log Analytics workspaces in a subscription.
+
+        Discovers workspaces via _get_workspaces_for_subscription, then for each workspace
+        calls the given Microsoft.SecurityInsights API path with nextLink pagination.
+        Results are written as JSONL to:
+            {output_dir}/{subscriptionId}/sentinel/{output_name}.json
+
+        Workspaces that return 404 (Sentinel not enabled) are skipped silently.
+        Workspaces that return other errors are logged at error level and skipped.
+
+        Args:
+            subscriptionId: Azure subscription ID.
+            api_path: Sentinel resource path segment, e.g. "incidents" or "alertRules".
+            api_version: API version string, e.g. "2024-03-01".
+            output_name: Output filename stem, e.g. "incidents".
+
+        Returns:
+            Total record count written across all workspaces.
+        """
+        header = self._make_auth_header()
+        sentinel_dir = os.path.join(self.output_dir, subscriptionId, "sentinel")
+        check_output_dir(sentinel_dir, self.logger)
+        outfile = os.path.join(sentinel_dir, f"{output_name}.json")
+
+        workspaces = await self._get_workspaces_for_subscription(subscriptionId)
+        if not workspaces:
+            self.logger.debug(
+                f"No workspaces in {subscriptionId}; skipping Sentinel {output_name}"
+            )
+            return 0
+
+        record_count = 0
+        for ws in workspaces:
+            ws_id: str = ws.get("id", "")
+            ws_name: str = ws.get("name", ws_id)
+
+            # Extract resource group from workspace ARM ID:
+            # /subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.OperationalInsights/workspaces/{name}
+            id_parts = ws_id.split("/")
+            try:
+                rg_index = [p.lower() for p in id_parts].index("resourcegroups")
+                resource_group = id_parts[rg_index + 1]
+            except (ValueError, IndexError):
+                self.logger.error(
+                    f"Could not parse resource group from workspace ID {ws_id!r}; skipping"
+                )
+                continue
+
+            url = self._get_mgmt_url(
+                f"/subscriptions/{subscriptionId}/resourceGroups/{resource_group}"
+                f"/providers/Microsoft.OperationalInsights/workspaces/{ws_name}"
+                f"/providers/Microsoft.SecurityInsights/{api_path}?api-version={api_version}"
+            )
+
+            ws_count = 0
+            while url:
+                async with self.ahsession.request('GET', url, headers=header, ssl=False) as r:
+                    result = await r.json()
+
+                if 'error' in result:
+                    err = result['error']
+                    code = err.get('code', '')
+                    if code in ('WorkspaceNotFound', 'ResourceNotFound', 'NotFound') or r.status == 404:
+                        # Sentinel not enabled on this workspace — skip silently
+                        self.logger.debug(
+                            f"Sentinel not enabled on workspace {ws_name} "
+                            f"(subscription {subscriptionId}); skipping"
+                        )
+                        break
+                    if code == 'ExpiredAuthenticationToken':
+                        self.logger.error(
+                            f"Authentication token expired: {err.get('message')} — please re-auth."
+                        )
+                        return record_count
+                    self.logger.error(
+                        f"Error fetching Sentinel {output_name} for workspace {ws_name} "
+                        f"in {subscriptionId}: {code} — {err.get('message')}"
+                    )
+                    break
+
+                entries = result.get('value', [])
+                if entries:
+                    with open(outfile, 'a+', encoding='utf-8') as f:
+                        for entry in entries:
+                            f.write(json.dumps(entry) + "\n")
+                        f.flush()
+                        os.fsync(f)
+                    ws_count += len(entries)
+                    record_count += len(entries)
+
+                # Sentinel API uses 'nextLink' for pagination
+                url = result.get('nextLink')
+                await asyncio.sleep(0)  # yield to event loop
+
+            if ws_count:
+                self.logger.debug(
+                    f"  Sentinel {output_name}: {ws_count} records from workspace {ws_name}"
+                )
+
+        return record_count
+
+    async def dump_sentinel_incidents(self) -> None:
+        """Dump Microsoft Sentinel incidents from all Log Analytics workspaces.
+
+        Queries the Sentinel Incidents API for every Log Analytics workspace across
+        all configured subscriptions.  Workspace discovery reuses the workspaces.json
+        artifact produced by dump_log_analytic_workspaces when available, falling back
+        to a live ARM list call otherwise.
+
+        Workspaces that return 404 (Sentinel not provisioned) are skipped silently
+        so that mixed environments (some workspaces with Sentinel, some without) are
+        handled gracefully.
+
+        API:
+            GET /subscriptions/{id}/resourceGroups/{rg}/providers/
+                Microsoft.OperationalInsights/workspaces/{ws}/providers/
+                Microsoft.SecurityInsights/incidents?api-version=2024-03-01
+
+        Output: {output_dir}/{subscriptionId}/sentinel/incidents.json  (JSONL)
+        """
+        # @decision DEC-SENTINEL-002
+        # @title Use 2024-03-01 API version for all Sentinel resource types
+        # @status accepted
+        # @rationale 2024-03-01 is the current stable GA version for the SecurityInsights
+        # resource provider as of the implementation date.  It supports incidents, alertRules,
+        # and dataConnectors under a single consistent version, simplifying maintenance.
+        if self.check_savestate("sentinel_incidents"):
+            return
+
+        total = 0
+        for subscriptionId in self.subscription_id_list:
+            self.logger.info(f"Getting Sentinel incidents from {subscriptionId}...")
+            count = await self._dump_sentinel_resource(
+                subscriptionId, "incidents", "2024-03-01", "incidents"
+            )
+            total += count
+            self.logger.info(
+                f"Finished getting Sentinel incidents from {subscriptionId} ({count} records)."
+            )
+
+        self.write_savestate("sentinel_incidents")
+        self.logger.debug(f"Sentinel incidents total across all subscriptions: {total}")
+
+    async def dump_sentinel_analytics_rules(self) -> None:
+        """Dump Microsoft Sentinel analytics rules (alert rules) from all Log Analytics workspaces.
+
+        Analytics rules define detection logic in Sentinel (scheduled queries, ML rules,
+        fusion rules, etc.).  Collecting them during incident response reveals which
+        detections were active and whether any may have been tampered with.
+
+        Workspace discovery and 404 handling follow the same pattern as
+        dump_sentinel_incidents.
+
+        API:
+            GET /subscriptions/{id}/resourceGroups/{rg}/providers/
+                Microsoft.OperationalInsights/workspaces/{ws}/providers/
+                Microsoft.SecurityInsights/alertRules?api-version=2024-03-01
+
+        Output: {output_dir}/{subscriptionId}/sentinel/analytics_rules.json  (JSONL)
+        """
+        if self.check_savestate("sentinel_analytics_rules"):
+            return
+
+        total = 0
+        for subscriptionId in self.subscription_id_list:
+            self.logger.info(f"Getting Sentinel analytics rules from {subscriptionId}...")
+            count = await self._dump_sentinel_resource(
+                subscriptionId, "alertRules", "2024-03-01", "analytics_rules"
+            )
+            total += count
+            self.logger.info(
+                f"Finished getting Sentinel analytics rules from {subscriptionId} ({count} records)."
+            )
+
+        self.write_savestate("sentinel_analytics_rules")
+        self.logger.debug(f"Sentinel analytics rules total across all subscriptions: {total}")
+
+    async def dump_sentinel_data_connectors(self) -> None:
+        """Dump Microsoft Sentinel data connectors from all Log Analytics workspaces.
+
+        Data connectors describe which data sources are feeding into Sentinel
+        (e.g. Azure Active Directory, Office 365, MDE, third-party SIEMs).
+        Collecting them provides a map of the tenant's detection coverage and can
+        reveal connectors that have been disabled or misconfigured during an attack.
+
+        Workspace discovery and 404 handling follow the same pattern as
+        dump_sentinel_incidents.
+
+        API:
+            GET /subscriptions/{id}/resourceGroups/{rg}/providers/
+                Microsoft.OperationalInsights/workspaces/{ws}/providers/
+                Microsoft.SecurityInsights/dataConnectors?api-version=2024-03-01
+
+        Output: {output_dir}/{subscriptionId}/sentinel/data_connectors.json  (JSONL)
+        """
+        if self.check_savestate("sentinel_data_connectors"):
+            return
+
+        total = 0
+        for subscriptionId in self.subscription_id_list:
+            self.logger.info(f"Getting Sentinel data connectors from {subscriptionId}...")
+            count = await self._dump_sentinel_resource(
+                subscriptionId, "dataConnectors", "2024-03-01", "data_connectors"
+            )
+            total += count
+            self.logger.info(
+                f"Finished getting Sentinel data connectors from {subscriptionId} ({count} records)."
+            )
+
+        self.write_savestate("sentinel_data_connectors")
+        self.logger.debug(f"Sentinel data connectors total across all subscriptions: {total}")
+
     # Max concurrent config pulls per batch to avoid event loop starvation
     CONFIG_BATCH_SIZE = 15
 
