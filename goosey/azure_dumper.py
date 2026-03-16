@@ -1292,6 +1292,144 @@ class AzureDataDumper(DataDumper):
             self.logger.debug("Caught HTTP Response Error on subscription " + sub_id + " for " + name)
             self.logger.debug('Error: {}'.format(str(e)))
 
+    async def dump_rbac_role_assignments(self) -> None:
+        """Dump all RBAC role assignments for each subscription via ARM REST API.
+
+        Queries GET /subscriptions/{id}/providers/Microsoft.Authorization/roleAssignments
+        for each configured subscription. Role assignments describe who (principalId) has
+        what role (roleDefinitionId) at what scope, making this essential for privilege
+        auditing during incident response.
+
+        Output: {output_dir}/{subscriptionId}/rbac_role_assignments.json (JSONL format)
+        API version: 2022-04-01 (supports filter, includes deleted assignments via
+        $filter=atScope() or includeClassicAdministrators)
+
+        @decision DEC-AZURE-RBAC-001
+        @title Use direct aiohttp ARM REST calls for RBAC data collection
+        @status accepted
+        @rationale The Azure SDK does not expose azure-mgmt-authorization as a dependency
+        in this project. The ARM REST API surface for RBAC is stable and well-documented.
+        Using the same aiohttp + resource_manager token pattern as other azure_dumper methods
+        keeps authentication consistent and avoids adding a new SDK dependency.
+        ARM paginates via 'nextLink' (not '@odata.nextLink'), so we handle that inline.
+        """
+        if self.check_savestate("rbac_role_assignments"):
+            return
+        header = self._make_auth_header()
+
+        for subscriptionId in self.subscription_id_list:
+            self.logger.info(f"Getting RBAC role assignments from {subscriptionId}...")
+            sub_dir = os.path.join(self.output_dir, subscriptionId)
+            check_output_dir(sub_dir, self.logger)
+            outfile = os.path.join(sub_dir, "rbac_role_assignments.json")
+
+            url = self._get_mgmt_url(
+                f"/subscriptions/{subscriptionId}/providers/Microsoft.Authorization"
+                f"/roleAssignments?api-version=2022-04-01"
+            )
+
+            record_count = 0
+            while url:
+                async with self.ahsession.request('GET', url, headers=header, ssl=False) as r:
+                    result = await r.json()
+
+                if 'error' in result:
+                    err = result['error']
+                    if err.get('code') == 'ExpiredAuthenticationToken':
+                        self.logger.error(
+                            f"Authentication token expired: {err.get('message')} — please re-auth."
+                        )
+                        return
+                    self.logger.error(
+                        f"Error fetching RBAC role assignments for {subscriptionId}: "
+                        f"{err.get('code')} — {err.get('message')}"
+                    )
+                    break
+
+                entries = result.get('value', [])
+                if entries:
+                    with open(outfile, 'a+', encoding='utf-8') as f:
+                        for entry in entries:
+                            f.write(json.dumps(entry) + "\n")
+                        f.flush()
+                        os.fsync(f)
+                    record_count += len(entries)
+
+                # ARM pagination uses 'nextLink', not '@odata.nextLink'
+                url = result.get('nextLink')
+                await asyncio.sleep(0)  # yield to event loop
+
+            self.logger.info(
+                f"Finished getting RBAC role assignments from {subscriptionId} "
+                f"({record_count} records)."
+            )
+
+        self.write_savestate("rbac_role_assignments")
+
+    async def dump_rbac_role_definitions(self) -> None:
+        """Dump all RBAC role definitions for each subscription via ARM REST API.
+
+        Queries GET /subscriptions/{id}/providers/Microsoft.Authorization/roleDefinitions
+        for each configured subscription. Returns both built-in and custom role definitions,
+        allowing analysts to map roleDefinitionId values from role assignments to human-readable
+        role names and permission sets.
+
+        Output: {output_dir}/{subscriptionId}/rbac_role_definitions.json (JSONL format)
+        API version: 2022-04-01
+        """
+        if self.check_savestate("rbac_role_definitions"):
+            return
+        header = self._make_auth_header()
+
+        for subscriptionId in self.subscription_id_list:
+            self.logger.info(f"Getting RBAC role definitions from {subscriptionId}...")
+            sub_dir = os.path.join(self.output_dir, subscriptionId)
+            check_output_dir(sub_dir, self.logger)
+            outfile = os.path.join(sub_dir, "rbac_role_definitions.json")
+
+            url = self._get_mgmt_url(
+                f"/subscriptions/{subscriptionId}/providers/Microsoft.Authorization"
+                f"/roleDefinitions?api-version=2022-04-01"
+            )
+
+            record_count = 0
+            while url:
+                async with self.ahsession.request('GET', url, headers=header, ssl=False) as r:
+                    result = await r.json()
+
+                if 'error' in result:
+                    err = result['error']
+                    if err.get('code') == 'ExpiredAuthenticationToken':
+                        self.logger.error(
+                            f"Authentication token expired: {err.get('message')} — please re-auth."
+                        )
+                        return
+                    self.logger.error(
+                        f"Error fetching RBAC role definitions for {subscriptionId}: "
+                        f"{err.get('code')} — {err.get('message')}"
+                    )
+                    break
+
+                entries = result.get('value', [])
+                if entries:
+                    with open(outfile, 'a+', encoding='utf-8') as f:
+                        for entry in entries:
+                            f.write(json.dumps(entry) + "\n")
+                        f.flush()
+                        os.fsync(f)
+                    record_count += len(entries)
+
+                # ARM pagination uses 'nextLink', not '@odata.nextLink'
+                url = result.get('nextLink')
+                await asyncio.sleep(0)  # yield to event loop
+
+            self.logger.info(
+                f"Finished getting RBAC role definitions from {subscriptionId} "
+                f"({record_count} records)."
+            )
+
+        self.write_savestate("rbac_role_definitions")
+
     # Max concurrent config pulls per batch to avoid event loop starvation
     CONFIG_BATCH_SIZE = 15
 
