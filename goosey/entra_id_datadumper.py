@@ -9,11 +9,27 @@ Data collected includes:
 - Audit logs (directory changes)
 - Provisioning logs
 - Configuration objects (apps, groups, users, roles, policies, devices, etc.)
+- PIM (Privileged Identity Management) assignment and eligibility schedules/instances/requests
 - Risk detections and risky objects (requires Entra ID P1/P2 licenses)
 - Security alerts and secure scores
 
 Most methods use helper_single_object for simple endpoints, with save state support
 for sign-in and audit log collection to enable resumable incremental pulls.
+
+@decision DEC-PIM-V3-001
+@title Migrate PIM endpoints from deprecated v2 Schedules to v3 Instances+Requests
+@status accepted
+@rationale Microsoft deprecated roleAssignmentSchedules and roleEligibilitySchedules
+  (Graph API beta) with removal targeted for October 2026. The v3 replacement splits
+  each concept into two complementary endpoints:
+    - *ScheduleInstances: current active state (who has access right now)
+    - *ScheduleRequests:  full audit trail of PIM activations and assignments
+  roleEligibilityScheduleInstances was already v3-compatible and is kept as-is.
+  roleAssignmentScheduleInstances (new) replaces roleAssignmentSchedules.
+  roleAssignmentScheduleRequests (new) provides the assignment audit trail.
+  roleEligibilityScheduleRequests (new) provides the eligibility request audit trail.
+  This migration ensures continued data collection after the deprecation deadline
+  and improves forensic coverage by capturing the full PIM request lifecycle.
 """
 
 import asyncio
@@ -526,9 +542,12 @@ class EntraIdDataDumper(DataDumper):
             helper_single_object('devices', conf_call_object, self.failurefile, caller=caller_name),
             helper_single_object('directoryRoles', conf_call_object, self.failurefile, caller=caller_name),
             helper_single_object('roleManagement/directory/roleDefinitions', conf_call_object, self.failurefile, caller=caller_name),
-            helper_single_object('roleManagement/directory/roleAssignmentSchedules', conf_call_object, self.failurefile, caller=caller_name),
-            helper_single_object('roleManagement/directory/roleEligibilitySchedules', conf_call_object, self.failurefile, caller=caller_name),
+            # PIM v3 endpoints (replaces deprecated roleAssignmentSchedules and
+            # roleEligibilitySchedules — removed October 2026; see DEC-PIM-V3-001)
+            helper_single_object('roleManagement/directory/roleAssignmentScheduleInstances', conf_call_object, self.failurefile, caller=caller_name),
+            helper_single_object('roleManagement/directory/roleAssignmentScheduleRequests', conf_call_object, self.failurefile, caller=caller_name),
             helper_single_object('roleManagement/directory/roleEligibilityScheduleInstances', conf_call_object, self.failurefile, caller=caller_name),
+            helper_single_object('roleManagement/directory/roleEligibilityScheduleRequests', conf_call_object, self.failurefile, caller=caller_name),
             helper_single_object('groups', conf_call_object, self.failurefile, caller=caller_name),
             helper_single_object('directory/deleteditems/microsoft.graph.group', conf_call_object, self.failurefile, caller=caller_name),
             helper_single_object('identity/identityProviders', conf_call_object, self.failurefile, caller=caller_name),
