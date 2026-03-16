@@ -126,6 +126,50 @@ class MDEDataDumper(DataDumper):
         await helper_single_object("api/recommendations", self.call_object, self.failurefile)
         self.write_savestate("recommendations")
 
+    async def dump_incidents(self) -> None:
+        """Dump Defender XDR incidents from the MDE security API.
+
+        Queries GET /api/incidents to collect correlated multi-alert incidents from
+        Microsoft Defender XDR. Each incident groups related alerts across endpoints,
+        identities, and cloud apps into a single investigation unit.
+
+        Uses self.app_auth (securitycenter_api token) via self.call_object.
+        Output: {output_dir}/mde/api_incidents.json (one JSON object per line, JSONL).
+
+        @decision DEC-MDE-INCIDENTS-001
+        @title Use helper_single_object for incidents endpoint
+        @status accepted
+        @rationale The /api/incidents endpoint follows the same OData @odata.nextLink
+          pagination contract as /api/alerts, /api/machines, etc. helper_single_object
+          handles this transparently, including rate-limit backoff and file output.
+        """
+        if self.check_savestate("incidents"):
+            return
+        await helper_single_object("api/incidents", self.call_object, self.failurefile)
+        self.write_savestate("incidents")
+
+    async def dump_machine_actions(self) -> None:
+        """Dump machine response actions from the MDE security API.
+
+        Queries GET /api/machineactions to collect all containment and remediation
+        actions taken on devices: isolation, antivirus scans, live response sessions,
+        package collection, and offboarding actions. Useful for reconstructing the
+        incident response timeline.
+
+        Uses self.app_auth (securitycenter_api token) via self.call_object.
+        Output: {output_dir}/mde/api_machineactions.json (one JSON object per line, JSONL).
+
+        @decision DEC-MDE-MACHINEACTIONS-001
+        @title Use helper_single_object for machineactions endpoint
+        @status accepted
+        @rationale The /api/machineactions endpoint follows the same OData pagination
+          contract as all other simple MDE REST endpoints. No custom logic needed —
+          same pattern as dump_machines and dump_alerts.
+        """
+        if self.check_savestate("machine_actions"):
+            return
+        await helper_single_object("api/machineactions", self.call_object, self.failurefile)
+        self.write_savestate("machine_actions")
 
     async def check_machines(self):
         self.ensure_token()
