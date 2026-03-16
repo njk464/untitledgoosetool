@@ -213,8 +213,16 @@ class M365DataDumper(DataDumper):
             append=True
 
     async def dump_exo_mailbox(self) -> None:
-        """
-        Dumps Exchange Online Mailbox Information
+        """Dumps Exchange Online mailbox information including forwarding configuration.
+
+        Calls Get-Mailbox with no property filtering, so the full default property set is
+        returned. This includes the critical BEC indicator fields:
+          - ForwardingAddress: internal forwarding target (Exchange DN)
+          - ForwardingSMTPAddress: external SMTP forwarding address
+          - DeliverToMailboxAndForward: whether mail is both delivered locally AND forwarded
+
+        These fields are present in EXO_Mailboxes_PowerShell.json for every mailbox.
+        No additional Get-Mailbox call is needed — the existing call captures them.
         """
         self.logger.debug("Starting dumping EXO Mailboxes")
         new_values = await self.save_exo_cmdlet("Get-Mailbox", "EXO_Mailboxes_PowerShell.json", Parameters={"IncludeInactiveMailbox": "True", "ResultSize": "Unlimited"})
@@ -265,6 +273,143 @@ class M365DataDumper(DataDumper):
             self.save_exo_cmdlet("Get-TransportConfig", "EXO_TransportConfig_PowerShell.json")
         )
         self.write_savestate("exo_config_info")
+
+    async def dump_message_trace(self) -> None:
+        """Collect Exchange Online message trace records via Get-MessageTraceV2.
+
+        Message trace records show mail flow through Exchange Online: sender, recipient,
+        subject, delivery status, source/destination IP, and connector information.
+        This is a high-value BEC indicator dataset — forwarded mail, exfiltration via
+        redirect rules, and compromised-account send patterns are all visible here.
+
+        API constraints:
+          - 90-day maximum retention window
+          - Maximum 10-day query window per cmdlet invocation
+          - Each call returns up to 5000 results (ResultSize maximum)
+
+        This method iterates in 10-day chunks from date_start to date_end (or the last
+        90 days if no date range is configured). Save state records the last successfully
+        completed chunk end time so interrupted runs can resume without re-pulling data.
+
+        Output: one JSONL file per 10-day chunk in {output_dir}/message_trace/.
+        Save state file: {output_dir}/.message_trace_state (stores last completed end date).
+
+        @decision DEC-MSG-TRACE-001
+        @title Use 10-day windows with per-chunk output files for message trace
+        @status accepted
+        @rationale Get-MessageTraceV2 hard-limits query windows to 10 days. Separate output
+          files per chunk allow partial re-collection without re-writing completed data.
+          5000 ResultSize is the documented maximum for this cmdlet.
+        """
+        # Determine the collection date range.
+        # Message trace only retains 90 days; cap the start accordingly.
+        end = get_end_time_yesterday()
+        max_retention_start = end - timedelta(days=90)
+
+        if self.date_range:
+            self.logger.debug(f"Message trace using configured date range: {self.date_start} to {self.date_end}")
+            start = datetime.strptime(self.date_start, "%Y-%m-%d")
+            end = datetime.strptime(self.date_end, "%Y-%m-%d")
+            # Clamp start to the 90-day retention window
+            if start < max_retention_start:
+                self.logger.warning(
+                    f"Message trace start {start.date()} is beyond the 90-day retention window. "
+                    f"Clamping to {max_retention_start.date()}."
+                )
+                start = max_retention_start
+        else:
+            start = max_retention_start
+
+        # Load save state: last successfully completed chunk end time
+        statefile = os.path.join(self.output_dir, ".message_trace_state")
+        saved_end = load_state(statefile)
+        if saved_end:
+            self.logger.info(f"Message trace resuming from {saved_end}")
+            start = max(saved_end, start)
+
+        if start >= end:
+            self.logger.info("Message trace: no time range to collect (already complete)")
+            return
+
+        # Create output subdirectory for per-chunk files
+        msg_trace_dir = os.path.join(self.output_dir, "message_trace")
+        os.makedirs(msg_trace_dir, exist_ok=True)
+
+        total_days = (end - start).days
+        self.logger.info(f"Collecting message trace: {start.date()} to {end.date()} ({total_days} days in 10-day chunks)")
+
+        # Progress bar (time-based, one unit = one day)
+        pm = get_progress_manager()
+        bar = None
+        bar_name = "m365_message_trace"
+        if pm:
+            bar = pm.create_time_bar(bar_name, total_days, desc=f"{'Collecting Message Trace':<35}")
+            if bar:
+                bar.bar_format = "{desc} |{bar}| {percentage:3.0f}% | day {n_fmt}/{total_fmt} | elapsed {elapsed} | {postfix}"
+
+        total_records = 0
+        chunk_start = start
+
+        try:
+            while chunk_start < end:
+                chunk_end = min(chunk_start + timedelta(days=10), end)
+
+                start_str = chunk_start.strftime("%Y-%m-%dT%H:%M:%S")
+                end_str = chunk_end.strftime("%Y-%m-%dT%H:%M:%S")
+                self.logger.debug(f"Message trace chunk: {start_str} -> {end_str}")
+
+                parameters = {
+                    "StartDate": start_str,
+                    "EndDate": end_str,
+                    "ResultSize": "5000",
+                }
+
+                response, err = await self.run_exo_cmdlet("Get-MessageTraceV2", parameters, timeout=120)
+
+                if err:
+                    self.logger.error(f"Message trace error for chunk {start_str} -> {end_str}: {err}")
+                    # Do not advance: leave save state at last good chunk so the next
+                    # run retries from here. Break to avoid silent data gaps.
+                    break
+
+                chunk_records = 0
+                if response and "value" in response and response["value"]:
+                    chunk_filename = (
+                        f"message_trace_{chunk_start.strftime('%Y%m%d')}_{chunk_end.strftime('%Y%m%d')}.json"
+                    )
+                    chunk_filepath = os.path.join(msg_trace_dir, chunk_filename)
+                    with open(chunk_filepath, "w", encoding="utf-8") as f:
+                        for record in response["value"]:
+                            f.write(json.dumps(record) + "\n")
+                            chunk_records += 1
+                    self.logger.debug(f"Saved {chunk_records} message trace records to {chunk_filename}")
+                else:
+                    self.logger.debug(f"No message trace records for chunk {start_str} -> {end_str}")
+
+                total_records += chunk_records
+
+                # Persist progress after each successful chunk
+                save_state(statefile, chunk_end)
+
+                # Advance progress bar by number of days covered in this chunk
+                chunk_days = (chunk_end - chunk_start).days
+                if bar:
+                    bar.update(chunk_days)
+                    bar.set_postfix_str(f"{total_records} records")
+
+                chunk_start = chunk_end
+
+        finally:
+            if bar:
+                remaining = total_days - bar.n
+                if remaining > 0:
+                    bar.update(remaining)
+            if pm:
+                pm.complete_task(bar_name)
+
+        self.logger.info(f"Message trace collection complete. Total records: {total_records}")
+
+    dump_message_trace._manages_own_progress = True
 
     async def dump_exo_mobile_devices(self) -> None:
         """
