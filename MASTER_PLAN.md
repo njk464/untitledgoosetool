@@ -61,6 +61,11 @@ Untitled Goose Tool (Goosey) is a CISA-published hunt and incident response tool
 | 2026-03-16 | DEC-IO-001 | goosey-analyzer | JSONL output format for findings | Machine-parseable, composable with jq/grep, same format as input for familiarity |
 | 2026-03-16 | DEC-PARSE-001 | goosey-analyzer | Use serde_json::StreamDeserializer for line-by-line parsing | Zero-copy where possible, constant memory regardless of file size, handles malformed lines gracefully |
 | 2026-03-16 | DEC-SESSION-001 | goosey-analyzer | In-memory session correlation for AiTM detection | Sign-in session anomalies (same SessionId, different IP/OS) require cross-line state; bounded by session count not file size |
+| 2026-03-22 | DEC-BROWSE-001 | browse-data | Static sourcetypes.json with prefix-based LAW sub-categories | Decouples from Splunk, pre-computes LAW grouping, ships as static data |
+| 2026-03-22 | DEC-BROWSE-002 | browse-data | Server-side directory scan, client-side tree rendering | Security (no file paths exposed), responsive filtering |
+| 2026-03-22 | DEC-BROWSE-003 | browse-data | Three API endpoints (tree/files/preview) | Separation of concerns, lazy loading, fast initial render |
+| 2026-03-22 | DEC-BROWSE-004 | browse-data | Client-side search filtering | 876 sourcetypes is small enough for client-side substring match |
+| 2026-03-22 | DEC-BROWSE-005 | browse-data | Bootstrap accordion + nested lists for tree | Consistent with existing UI, no external dependencies |
 
 ---
 
@@ -324,6 +329,211 @@ Main is sacred. Each wave dispatches parallel worktrees:
 - UAL AuditData is double-encoded: outer JSON has `AuditData` field containing a JSON string that must be parsed again
 - Goose Entra config files: `entraid_configs/{endpoint}.json` (~50 files)
 - MITRE ATT&CK techniques: T1078, T1110.001, T1110.003, T1539, T1114.003, T1564.008, T1090.003, T1098
+
+### Initiative: browse-data
+**Status:** active
+**Started:** 2026-03-22
+**Goal:** Add a "Browse Data" tab to the web UI that lets analysts explore collected data organized by platform/type/sourcetype hierarchy with search, file listing, and preview.
+
+> Analysts who collect Microsoft cloud telemetry with Goose have no way to browse their collected data through the web UI. After collection, they must manually navigate the output directory (which can contain hundreds of files across 4+ platform subdirectories) using command-line tools. The existing `inputs.conf` defines 876 Splunk-specific sourcetypes but is unusable as a general registry. A standalone sourcetype registry and browseable tree UI solves this.
+
+**Dominant Constraint:** simplicity
+
+#### Goals
+- REQ-GOAL-101: Enable analysts to browse all collected data organized by platform/type/sourcetype hierarchy without leaving the web UI
+- REQ-GOAL-102: Replace Splunk-centric `inputs.conf` with a standalone sourcetype registry (`sourcetypes.json`)
+- REQ-GOAL-103: Allow search/filter across all 876 sourcetypes to find specific data quickly
+- REQ-GOAL-104: Sub-categorize 670 LAW types by prefix pattern (aad*, device*, email*, etc.) for navigability
+
+#### Non-Goals
+- REQ-NOGO-101: Full-text search within file contents — browse/filter by sourcetype metadata only for this initiative
+- REQ-NOGO-102: Data editing or deletion — read-only browsing
+- REQ-NOGO-103: Real-time updates while collection is running — browse shows point-in-time snapshot
+- REQ-NOGO-104: Integration with goosey-analyzer findings — separate initiative
+
+#### Requirements
+
+**Must-Have (P0)**
+
+- REQ-P0-101: `sourcetypes.json` defining all 876 sourcetypes with hierarchy: type (azure/eid/mde/m365) > subtype (law/policy/exchange/etc.) > sourcetype. Each entry has: id, display_name, description, file_glob pattern.
+  Acceptance: Given sourcetypes.json is loaded, When all entries are validated, Then every sourcetype from inputs.conf has a corresponding entry with non-empty display_name and file_glob
+- REQ-P0-102: New "Browse Data" tab in the SPA alongside existing Setup/Configure/Collect tabs, showing a collapsible tree of type > subtype > sourcetype
+  Acceptance: Given collected data exists in the output directory, When user clicks the Browse Data tab, Then a tree displays only categories containing data files
+- REQ-P0-103: File listing when a sourcetype is selected — show matching files with name, size, modification time, and record count
+  Acceptance: Given a sourcetype is selected, When files exist matching its glob pattern, Then a table shows all matching files with metadata
+- REQ-P0-104: Search input that filters the visible tree by sourcetype name or description (client-side substring match)
+  Acceptance: Given the tree is loaded, When user types "signin" in the search box, Then only sourcetypes containing "signin" in name or description are visible
+- REQ-P0-105: LAW sub-categorization by prefix — group 670 LAW types into ~15-20 sub-categories (aad, acs, app, device, email, identity, network, security, etc.)
+  Acceptance: Given the tree is expanded to azure > law, Then LAW types are grouped by prefix sub-category, not shown as a flat list of 670 items
+- REQ-P0-106: Only show categories with collected data — empty categories/sourcetypes are hidden from the tree
+  Acceptance: Given no MDE data has been collected, When the tree loads, Then the MDE category does not appear
+
+**Nice-to-Have (P1)**
+
+- REQ-P1-101: File preview — click a file to see the first 50 lines rendered in a code viewer within the UI
+- REQ-P1-102: Breadcrumb navigation showing current position in the hierarchy
+- REQ-P1-103: File count badges on tree nodes showing how many files each category contains
+
+**Future Consideration (P2)**
+
+- REQ-P2-101: Full-text search within JSONL file contents
+- REQ-P2-102: Integration with goosey-analyzer to show findings alongside raw data
+- REQ-P2-103: Data export (download selected files as zip)
+
+#### Definition of Done
+
+The Browse Data tab loads in the web UI, displays a tree of collected data organized by platform/type/sourcetype, filters by search, lists files for selected sourcetypes with metadata, and previews file contents. Only categories with collected data files are shown. All 876 sourcetypes from inputs.conf are represented in sourcetypes.json. REQ-P0-101 through REQ-P0-106 acceptance criteria are met.
+
+#### Architectural Decisions
+
+- DEC-BROWSE-001: Static sourcetypes.json with prefix-based LAW sub-categories
+  Addresses: REQ-GOAL-102, REQ-P0-101, REQ-P0-105.
+  Rationale: A static JSON file decouples the UI from Splunk inputs.conf and from runtime dumper introspection. The 670 LAW types are sub-categorized by prefix pattern at registry-generation time, not at runtime. The file ships with the project under `goosey/data/sourcetypes.json`.
+
+- DEC-BROWSE-002: Server-side directory scan, client-side tree rendering
+  Addresses: REQ-P0-102, REQ-P0-106.
+  Rationale: Flask backend scans the output directory and returns only categories/files that exist. The frontend renders a tree from the API response. This keeps file system access server-side (security) while enabling responsive client-side filtering (UX). Alternative rejected: client-side directory listing exposes file system paths.
+
+- DEC-BROWSE-003: Three API endpoints — /api/browse/tree, /api/browse/files, /api/browse/preview
+  Addresses: REQ-P0-102, REQ-P0-103, REQ-P1-101.
+  Rationale: Separation of concerns. Tree endpoint returns hierarchy with file counts (fast). Files endpoint returns file list for a selected sourcetype (on-demand). Preview endpoint returns first N lines (lazy). Avoids loading all file metadata upfront.
+
+- DEC-BROWSE-004: Client-side search filtering against tree metadata
+  Addresses: REQ-P0-104.
+  Rationale: With ~876 sourcetypes, client-side substring filtering is fast enough. The tree JSON includes display names and descriptions. No server round-trip needed for search.
+
+- DEC-BROWSE-005: Bootstrap accordion + nested lists for tree component
+  Addresses: REQ-P0-102.
+  Rationale: Consistent with existing UI patterns (Bootstrap 5.3 + vanilla JS). No external tree library needed.
+
+#### Waves
+
+##### Initiative Summary
+- **Total items:** 3
+- **Critical path:** 3 waves (W1-1 -> W2-1 -> W3-1)
+- **Max width:** 1
+- **Gates:** 2 review (W1-1, W3-1), 0 approve
+
+##### Wave 1 (no dependencies)
+**Parallel dispatches:** 1
+
+**W1-1: sourcetypes.json registry and generation script (#88)** — Weight: M, Gate: review
+- Create `goosey/data/sourcetypes.json` with all 876 sourcetypes organized by hierarchy
+- Parse all sourcetypes from `conf/inputs.conf` to extract the full list
+- Group LAW types into ~15-20 prefix-based sub-categories: aad (20), acs (20+), app (10+), device (15+), email (4), identity (4), microsoft (10+), network (5+), security (10+), sentinel (10+), syslog/sysmon (5), threat (5), update (5), other (remainder)
+- Each sourcetype entry: id, display_name (CamelCase from table name), description (brief), file_glob (pattern matching actual output files)
+- Map glob patterns to actual output directory structure from code analysis (honk.py output_dir creation, dumper file paths)
+- Validation script: `scripts/validate_sourcetypes.py` that checks all entries have valid globs and all inputs.conf sourcetypes are covered
+- sourcetypes.json schema:
+  ```json
+  {
+    "version": "1.0",
+    "types": {
+      "azure": {
+        "display_name": "Azure",
+        "description": "Azure cloud resources and infrastructure",
+        "subtypes": {
+          "activity_log": {
+            "display_name": "Activity Log",
+            "sourcetypes": {
+              "azure_activity_log": {
+                "display_name": "Activity Log",
+                "description": "Azure subscription activity events",
+                "file_glob": "{sub_id}/Activity Log/azure_activity_log*.json"
+              }
+            }
+          },
+          "law": {
+            "display_name": "Log Analytics Workspace",
+            "subcategories": {
+              "aad": {
+                "display_name": "Azure AD / Entra ID",
+                "sourcetypes": { "...": "..." }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  ```
+- The `{sub_id}` placeholder is expanded by the backend when scanning subscription directories under `output/azure/`
+- **Integration:** New file `goosey/data/sourcetypes.json`. New file `scripts/validate_sourcetypes.py`. No changes to existing code.
+
+##### Wave 2
+**Parallel dispatches:** 1
+**Blocked by:** W1-1
+
+**W2-1: Flask API endpoints and output directory scanner (#89)** — Weight: L, Gate: none, Deps: W1-1
+- Add to `goosey/web.py`:
+  - `load_sourcetypes()` — Load and cache `sourcetypes.json` from `goosey/data/`
+  - `scan_output_dir(output_dir, sourcetypes)` — Walk output directory, match files against sourcetype globs, build tree with file counts. Handle Azure subscription subdirectories by expanding `{sub_id}` placeholder. Skip hidden files (`.savestate`).
+  - `GET /api/browse/tree` — Returns filtered tree (only nodes with data). Accepts `output_dir` query param (defaults to app config).
+  - `GET /api/browse/files` — Returns file list for a specific sourcetype. Params: type, subtype, [subcategory], sourcetype.
+  - `GET /api/browse/preview` — Returns first N lines of a file. Path validation: must be within output_dir, no `..` traversal. Returns `{"lines": [...], "total_lines": N}`.
+- Path traversal protection: all file paths resolved with `os.path.realpath()` and checked against output_dir prefix
+- Handle missing output directory gracefully (return empty tree, not error)
+- **Integration:** Modify `goosey/web.py` — add 3 new route functions and 2 helper functions. Import `goosey/data/sourcetypes.json` using `importlib.resources`.
+
+##### Wave 3
+**Parallel dispatches:** 1
+**Blocked by:** W2-1
+
+**W3-1: Frontend Browse Data tab (#90)** — Weight: L, Gate: review, Deps: W2-1
+- Add "Browse Data" tab to `goosey/templates/index.html` nav tabs (step badge 4)
+- Layout: left panel (1/3) = tree + search, right panel (2/3) = file list + preview
+- Tree component:
+  - Bootstrap accordion for type-level expansion
+  - Nested `<ul>` lists for subtype/subcategory/sourcetype levels
+  - Click sourcetype to load file list in right panel
+  - File count badges on each node (REQ-P1-103)
+  - Active/selected state styling consistent with existing theme
+- Search input above tree:
+  - Debounced (300ms) client-side filtering
+  - Filters visible tree nodes by matching display_name or description
+  - Shows/hides entire branches based on whether any descendant matches
+  - Clear button to reset filter
+- File list panel:
+  - Bootstrap table showing name, size (human-readable), modified date, record count
+  - Click file to show preview below
+  - Breadcrumb showing: Type > Subtype > [Subcategory >] Sourcetype (REQ-P1-102)
+- Preview panel:
+  - Monospace code display (reuse `.output-area` styling)
+  - Shows first 50 lines with line numbers
+  - "Load more" button for next 50 lines
+  - JSON syntax highlighting (basic: keys in one color, strings in another)
+- Loading states: spinner while tree/files/preview load
+- Empty state: "No collected data found. Run a collection first." with link to Collect tab
+- CSS additions within existing `<style>` block — tree indentation, selected state, breadcrumbs
+- Fetch tree on tab activation (not on page load — lazy)
+- **Integration:** Modify `goosey/templates/index.html` — add tab nav item, tab pane, JS functions, CSS rules. No new template files.
+
+##### Critical Files
+- `goosey/data/sourcetypes.json` — The sourcetype registry; every other component depends on this
+- `goosey/web.py` — Flask backend; receives 3 new endpoints and 2 helper functions
+- `goosey/templates/index.html` — Single-page app; receives new tab, tree component, search, preview
+- `conf/inputs.conf` — Reference for all 876 sourcetypes (read-only, source of truth for registry generation)
+- `scripts/validate_sourcetypes.py` — Validates registry completeness against inputs.conf
+
+##### Decision Log
+<!-- Guardian appends here after wave completion -->
+
+#### browse-data Worktree Strategy
+
+Main is sacred. Sequential waves, single worktree per wave:
+- **Wave 1:** `.worktrees/browse-registry` on branch `feature/browse-registry`
+- **Wave 2:** `.worktrees/browse-api` on branch `feature/browse-api`
+- **Wave 3:** `.worktrees/browse-frontend` on branch `feature/browse-frontend`
+
+#### browse-data References
+
+- Existing web UI: `goosey/web.py`, `goosey/templates/index.html`
+- Sourcetype definitions: `conf/inputs.conf` (876 stanzas, 670 LAW)
+- Output directory structure: Created by `honk.py` lines 332-337, platform dumpers
+- Azure output paths: `output/azure/{subscription_id}/` with nested subdirectories
+- Entra ID output paths: `output/entraid/` with `signin_*/`, `entraid_configs/`, `ual_*`
+- M365 output paths: `output/m365/` with `EXO_*`, `ual_*`
+- MDE output paths: `output/mde/` with `api_*`
 
 ---
 
