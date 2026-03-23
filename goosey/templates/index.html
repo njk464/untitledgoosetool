@@ -52,6 +52,110 @@
   .navbar { background: #0f3460 !important; }
   .navbar-brand { color: #64ffda !important; font-weight: 700; }
   h6 { color: #ccd6f6; }
+
+  /* ---- Browse Data tab ---- */
+  /* Tree panel */
+  .browse-tree-panel { border-right: 1px solid #0f3460; min-height: 600px; padding-right: 0; }
+  .browse-right-panel { padding-left: 1rem; }
+
+  /* Tree search */
+  .browse-search-wrap { position: relative; margin-bottom: 0.75rem; }
+  .browse-search-wrap input { padding-right: 2rem; background: #0d0d1a; border-color: #0f3460; color: #e0e0e0; }
+  .browse-search-wrap input:focus { border-color: #64ffda; box-shadow: none; background: #0d0d1a; }
+  .browse-search-wrap input::placeholder { color: #4a5568; }
+  .browse-search-clear { position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+    background: none; border: none; color: #8892b0; cursor: pointer; padding: 0; font-size: 1rem;
+    line-height: 1; display: none; }
+  .browse-search-clear.visible { display: block; }
+
+  /* Accordion / tree levels */
+  .browse-accordion .accordion-item { background: transparent; border: none; border-bottom: 1px solid #0f3460; }
+  .browse-accordion .accordion-button { background: #16213e; color: #ccd6f6; font-size: 0.85rem;
+    padding: 0.5rem 0.75rem; border-radius: 0 !important; }
+  .browse-accordion .accordion-button:not(.collapsed) { background: #0f3460; color: #64ffda; box-shadow: none; }
+  .browse-accordion .accordion-button::after { filter: invert(0.6) sepia(1) saturate(3) hue-rotate(130deg); }
+  .browse-accordion .accordion-body { background: #12192e; padding: 0.25rem 0; }
+
+  /* Subtype section headers */
+  .browse-subtype-header { padding: 0.35rem 1rem; font-size: 0.8rem; color: #8892b0;
+    text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #0f3460;
+    cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
+  .browse-subtype-header:hover { background: #16213e; color: #ccd6f6; }
+  .browse-subtype-body { background: #0d1020; }
+
+  /* Subcategory level */
+  .browse-subcat-header { padding: 0.3rem 1.5rem; font-size: 0.78rem; color: #6c757d;
+    cursor: pointer; display: flex; justify-content: space-between; align-items: center;
+    border-bottom: 1px dotted #0f3460; }
+  .browse-subcat-header:hover { background: #131a2e; color: #8892b0; }
+  .browse-subcat-body { background: #0a0f1e; }
+
+  /* Sourcetype list items */
+  .browse-st-item { display: flex; justify-content: space-between; align-items: center;
+    padding: 0.28rem 2rem; font-size: 0.8rem; color: #8892b0; cursor: pointer;
+    border-bottom: 1px dotted #0a0f1e; transition: background 0.1s; }
+  .browse-st-item:hover { background: #16213e; color: #ccd6f6; }
+  .browse-st-item.active { background: #0f3460; color: #64ffda; font-weight: 600; }
+  .browse-st-item-subcat { padding-left: 2.75rem; }
+
+  /* Badges in tree */
+  .browse-badge { background: #0f3460; color: #8892b0; font-size: 0.7rem;
+    padding: 1px 6px; border-radius: 10px; white-space: nowrap; }
+  .browse-st-item.active .browse-badge { background: #1a4a6e; color: #64ffda; }
+
+  /* Hidden node for search filtering */
+  .browse-hidden { display: none !important; }
+
+  /* Collapse toggle chevron */
+  .browse-chevron { font-size: 0.65rem; color: #4a5568; transition: transform 0.2s; margin-left: 4px; }
+  .browse-chevron.open { transform: rotate(90deg); }
+
+  /* Right panel: breadcrumb */
+  .browse-breadcrumb { font-size: 0.8rem; color: #8892b0; margin-bottom: 0.75rem; min-height: 1.5rem; }
+  .browse-breadcrumb span { color: #4a5568; margin: 0 4px; }
+  .browse-breadcrumb .bc-seg { color: #ccd6f6; }
+  .browse-breadcrumb .bc-seg.bc-last { color: #64ffda; font-weight: 600; }
+
+  /* File table */
+  .browse-file-table { font-size: 0.82rem; }
+  .browse-file-table thead th { color: #8892b0; background: #0f3460; border-color: #1a1a2e;
+    font-weight: 500; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.5px;
+    padding: 0.4rem 0.6rem; }
+  .browse-file-table tbody tr { cursor: pointer; transition: background 0.1s; }
+  .browse-file-table tbody tr:hover td { background: #16213e; }
+  .browse-file-table tbody tr.active td { background: #0f3460; color: #64ffda; }
+  .browse-file-table tbody td { border-color: #0f3460; padding: 0.35rem 0.6rem; vertical-align: middle; }
+  .browse-file-table .fname { color: #ccd6f6; font-family: 'Consolas', 'Monaco', monospace; }
+  .browse-file-table .fsize { color: #8892b0; white-space: nowrap; }
+  .browse-file-table .fmod { color: #6c757d; font-size: 0.75rem; white-space: nowrap; }
+  .browse-file-table .flines { color: #6c757d; text-align: right; white-space: nowrap; }
+
+  /* Preview area */
+  .browse-preview-wrap { background: #0a0a1a; border: 1px solid #0f3460; border-radius: 6px;
+    overflow: hidden; margin-top: 0.75rem; }
+  .browse-preview-header { background: #0f3460; padding: 0.3rem 0.75rem; font-size: 0.75rem;
+    color: #8892b0; display: flex; justify-content: space-between; align-items: center; }
+  .browse-preview-header .pv-filename { color: #ccd6f6; font-family: 'Consolas', 'Monaco', monospace; font-size: 0.78rem; }
+  .browse-preview-code { overflow-y: auto; max-height: 400px; }
+  .browse-preview-code pre { margin: 0; padding: 0.5rem 0; background: transparent; }
+  .browse-preview-code pre code { display: block; font-family: 'Consolas', 'Monaco', monospace;
+    font-size: 0.78rem; line-height: 1.5; color: #a8ff78; }
+  .browse-line { display: flex; }
+  .browse-line-num { color: #4a5568; text-align: right; min-width: 3.5rem; padding-right: 0.75rem;
+    padding-left: 0.5rem; user-select: none; flex-shrink: 0; border-right: 1px solid #0f3460; margin-right: 0.75rem; }
+  .browse-line-content { flex: 1; white-space: pre-wrap; word-break: break-all; color: #a8ff78; }
+  .browse-line-content.json-pretty { color: #ccd6f6; }
+  .browse-load-more-wrap { padding: 0.4rem 0.75rem; background: #0f3460; border-top: 1px solid #1a1a2e; }
+
+  /* Empty states */
+  .browse-empty { text-align: center; padding: 3rem 1rem; color: #4a5568; }
+  .browse-empty .be-icon { font-size: 2.5rem; margin-bottom: 0.5rem; }
+  .browse-empty p { margin: 0; font-size: 0.9rem; }
+  .browse-empty a { color: #64ffda; text-decoration: none; }
+  .browse-empty a:hover { text-decoration: underline; }
+
+  /* Spinner overlay */
+  .browse-spinner-wrap { text-align: center; padding: 3rem; color: #8892b0; }
 </style>
 </head>
 <body>
@@ -68,6 +172,7 @@
     <li class="nav-item"><a class="nav-link active" data-bs-toggle="tab" href="#tab-setup"><span class="step-badge">1</span>Setup</a></li>
     <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-conf"><span class="step-badge">2</span>Configure</a></li>
     <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-collect"><span class="step-badge">3</span>Collect</a></li>
+    <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-browse" id="browse-tab-link"><span class="step-badge">4</span>Browse Data</a></li>
   </ul>
 
   <div class="tab-content">
@@ -248,6 +353,41 @@
         </div>
       </div>
     </div>
+
+    <!-- ============== BROWSE DATA TAB ============== -->
+    <div class="tab-pane fade" id="tab-browse">
+      <div class="row">
+
+        <!-- LEFT PANEL: search + tree -->
+        <div class="col-4 browse-tree-panel">
+          <div class="browse-search-wrap">
+            <input type="text" class="form-control form-control-sm" id="browse-search"
+              placeholder="Search sourcetypes..." oninput="browseDebouncedSearch(this.value)">
+            <button class="browse-search-clear" id="browse-search-clear" title="Clear search"
+              onclick="browseClearSearch()">&#x2715;</button>
+          </div>
+          <div id="browse-tree-container">
+            <div class="browse-spinner-wrap">
+              <div class="spinner-border spinner-border-sm text-secondary" role="status"></div>
+              <p class="mt-2 small">Loading tree...</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- RIGHT PANEL: breadcrumb + files + preview -->
+        <div class="col-8 browse-right-panel">
+          <div class="browse-breadcrumb" id="browse-breadcrumb"></div>
+          <div id="browse-files-container">
+            <div class="browse-empty">
+              <div class="be-icon">&#128193;</div>
+              <p>Select a sourcetype from the tree to view files.</p>
+            </div>
+          </div>
+          <div id="browse-preview-container"></div>
+        </div>
+
+      </div>
+    </div><!-- /tab-browse -->
 
   </div><!-- tab-content -->
 </div><!-- container -->
@@ -562,7 +702,634 @@ function stopCollect() {
 // ---- Init ----
 document.addEventListener('DOMContentLoaded', () => {
   loadConf();
+  // Lazy-load the browse tree when the Browse Data tab is first shown
+  document.getElementById('browse-tab-link').addEventListener('shown.bs.tab', () => {
+    if (!browseState.treeLoaded && !browseState.treeLoading) {
+      loadBrowseTree();
+    }
+  });
 });
+
+// ============================================================
+// BROWSE DATA
+// @decision DEC-BROWSE-001
+// @title Lazy-loaded, client-side-filtered sourcetype tree
+// @status accepted
+// @rationale The tree is fetched once on first tab activation and cached in
+//   browseState.treeData. All search filtering is done client-side via
+//   DOM show/hide so subsequent keystrokes have zero network cost. File lists
+//   and preview content are fetched on demand (separate endpoints) to keep the
+//   initial tree response small.
+// ============================================================
+
+/** Shared mutable state for the Browse Data panel. */
+const browseState = {
+  treeData: null,      // Cached /api/browse/tree response
+  treeLoaded: false,
+  treeLoading: false,
+  selectedST: null,    // { typeId, subtypeId, subcategoryId, sourcetypeId }
+  selectedFile: null,  // relative path string
+  previewOffset: 0,    // current pagination offset for preview
+  previewPath: null,   // path currently shown in preview
+};
+
+// ---- Debounce utility ----
+/**
+ * Return a debounced version of fn that fires after delayMs of inactivity.
+ * @param {Function} fn
+ * @param {number} delayMs
+ */
+function debounce(fn, delayMs) {
+  let timer = null;
+  return function(...args) {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn.apply(this, args), delayMs);
+  };
+}
+
+const browseDebouncedSearch = debounce(filterTree, 300);
+
+// ---- Tree loading ----
+
+/**
+ * Fetch the sourcetype tree from /api/browse/tree and render it.
+ * Caches the result in browseState.treeData; subsequent calls are no-ops.
+ */
+function loadBrowseTree() {
+  if (browseState.treeLoaded || browseState.treeLoading) return;
+  browseState.treeLoading = true;
+
+  const container = document.getElementById('browse-tree-container');
+  container.innerHTML = `
+    <div class="browse-spinner-wrap">
+      <div class="spinner-border spinner-border-sm text-secondary" role="status"></div>
+      <p class="mt-2 small">Loading tree...</p>
+    </div>`;
+
+  fetch('/api/browse/tree')
+    .then(r => r.json())
+    .then(data => {
+      browseState.treeData = data;
+      browseState.treeLoaded = true;
+      browseState.treeLoading = false;
+      renderBrowseTree(data);
+    })
+    .catch(err => {
+      browseState.treeLoading = false;
+      container.innerHTML = `<div class="browse-empty"><p class="text-danger">Failed to load tree: ${err.message}</p></div>`;
+    });
+}
+
+/**
+ * Render the full sourcetype tree into #browse-tree-container.
+ * @param {{ types: Array }} data - Response from /api/browse/tree
+ */
+function renderBrowseTree(data) {
+  const container = document.getElementById('browse-tree-container');
+
+  if (!data.types || data.types.length === 0) {
+    container.innerHTML = `
+      <div class="browse-empty">
+        <div class="be-icon">&#128194;</div>
+        <p>No collected data found. Run a collection first.
+           <br><a href="#tab-collect" onclick="document.querySelector('[href=\\'#tab-collect\\']').click()">Go to Collect tab</a>
+        </p>
+      </div>`;
+    return;
+  }
+
+  // Build accordion (one item per top-level type)
+  const acc = document.createElement('div');
+  acc.className = 'accordion browse-accordion';
+  acc.id = 'browse-accordion-root';
+
+  data.types.forEach((typeNode, typeIdx) => {
+    const accItem = document.createElement('div');
+    accItem.className = 'accordion-item';
+    accItem.dataset.typeId = typeNode.id;
+
+    const headerId = `browse-acc-h-${typeNode.id}`;
+    const bodyId   = `browse-acc-b-${typeNode.id}`;
+
+    accItem.innerHTML = `
+      <h2 class="accordion-header" id="${headerId}">
+        <button class="accordion-button ${typeIdx > 0 ? 'collapsed' : ''}" type="button"
+          data-bs-toggle="collapse" data-bs-target="#${bodyId}"
+          aria-expanded="${typeIdx === 0 ? 'true' : 'false'}" aria-controls="${bodyId}">
+          <span class="flex-fill">${escHtml(typeNode.display_name)}</span>
+          <span class="browse-badge ms-2">${typeNode.file_count}</span>
+        </button>
+      </h2>
+      <div id="${bodyId}" class="accordion-collapse collapse ${typeIdx === 0 ? 'show' : ''}"
+        aria-labelledby="${headerId}" data-bs-parent="#browse-accordion-root">
+        <div class="accordion-body" id="browse-type-body-${typeNode.id}"></div>
+      </div>`;
+
+    const body = accItem.querySelector(`#browse-type-body-${typeNode.id}`);
+    typeNode.subtypes.forEach(subtypeNode => {
+      body.appendChild(renderSubtypeSection(typeNode.id, subtypeNode));
+    });
+
+    acc.appendChild(accItem);
+  });
+
+  container.innerHTML = '';
+  container.appendChild(acc);
+}
+
+/**
+ * Build a DOM element for a subtype section (collapsible).
+ * @param {string} typeId
+ * @param {Object} subtypeNode
+ * @returns {HTMLElement}
+ */
+function renderSubtypeSection(typeId, subtypeNode) {
+  const wrap = document.createElement('div');
+  wrap.dataset.subtypeId = subtypeNode.id;
+  wrap.dataset.typeId = typeId;
+
+  const bodyId = `browse-subtype-body-${typeId}-${subtypeNode.id}`;
+
+  const header = document.createElement('div');
+  header.className = 'browse-subtype-header';
+  header.setAttribute('data-bs-toggle', 'collapse');
+  header.setAttribute('data-bs-target', `#${bodyId}`);
+  header.setAttribute('aria-expanded', 'true');
+  header.innerHTML = `
+    <span>
+      <span class="browse-chevron open">&#9658;</span>
+      ${escHtml(subtypeNode.display_name)}
+    </span>
+    <span class="browse-badge">${subtypeNode.file_count}</span>`;
+  header.addEventListener('click', () => {
+    const chev = header.querySelector('.browse-chevron');
+    setTimeout(() => {
+      const bodyEl = document.getElementById(bodyId);
+      chev.classList.toggle('open', bodyEl && bodyEl.classList.contains('show'));
+    }, 200);
+  });
+
+  const body = document.createElement('div');
+  body.className = 'collapse show browse-subtype-body';
+  body.id = bodyId;
+
+  // Direct sourcetypes on the subtype (non-LAW)
+  if (subtypeNode.sourcetypes && subtypeNode.sourcetypes.length > 0) {
+    subtypeNode.sourcetypes.forEach(st => {
+      body.appendChild(renderSTItem(typeId, subtypeNode.id, null, st));
+    });
+  }
+
+  // Subcategories (LAW pattern)
+  if (subtypeNode.subcategories && subtypeNode.subcategories.length > 0) {
+    subtypeNode.subcategories.forEach(catNode => {
+      body.appendChild(renderSubcategorySection(typeId, subtypeNode.id, catNode));
+    });
+  }
+
+  wrap.appendChild(header);
+  wrap.appendChild(body);
+  return wrap;
+}
+
+/**
+ * Build a DOM element for a subcategory section.
+ * @param {string} typeId
+ * @param {string} subtypeId
+ * @param {Object} catNode
+ * @returns {HTMLElement}
+ */
+function renderSubcategorySection(typeId, subtypeId, catNode) {
+  const wrap = document.createElement('div');
+  wrap.dataset.subcatId = catNode.id;
+
+  const bodyId = `browse-subcat-body-${typeId}-${subtypeId}-${catNode.id}`;
+
+  const header = document.createElement('div');
+  header.className = 'browse-subcat-header';
+  header.setAttribute('data-bs-toggle', 'collapse');
+  header.setAttribute('data-bs-target', `#${bodyId}`);
+  header.innerHTML = `
+    <span>
+      <span class="browse-chevron open">&#9658;</span>
+      ${escHtml(catNode.display_name)}
+    </span>
+    <span class="browse-badge">${catNode.file_count}</span>`;
+  header.addEventListener('click', () => {
+    const chev = header.querySelector('.browse-chevron');
+    setTimeout(() => {
+      const bodyEl = document.getElementById(bodyId);
+      chev.classList.toggle('open', bodyEl && bodyEl.classList.contains('show'));
+    }, 200);
+  });
+
+  const body = document.createElement('div');
+  body.className = 'collapse show browse-subcat-body';
+  body.id = bodyId;
+
+  catNode.sourcetypes.forEach(st => {
+    const item = renderSTItem(typeId, subtypeId, catNode.id, st);
+    item.classList.add('browse-st-item-subcat');
+    body.appendChild(item);
+  });
+
+  wrap.appendChild(header);
+  wrap.appendChild(body);
+  return wrap;
+}
+
+/**
+ * Build a clickable sourcetype list item.
+ * @param {string} typeId
+ * @param {string} subtypeId
+ * @param {string|null} subcategoryId
+ * @param {Object} stNode
+ * @returns {HTMLElement}
+ */
+function renderSTItem(typeId, subtypeId, subcategoryId, stNode) {
+  const item = document.createElement('div');
+  item.className = 'browse-st-item';
+  item.dataset.stId = stNode.id;
+  item.dataset.stName = (stNode.display_name || stNode.id).toLowerCase();
+  item.dataset.stDesc = (stNode.description || '').toLowerCase();
+  item.innerHTML = `
+    <span class="text-truncate" title="${escHtml(stNode.display_name)}">${escHtml(stNode.display_name)}</span>
+    <span class="browse-badge ms-1">${stNode.file_count}</span>`;
+  item.addEventListener('click', () => {
+    selectSourcetype(typeId, subtypeId, subcategoryId, stNode.id);
+  });
+  return item;
+}
+
+// ---- Tree search ----
+
+/**
+ * Filter tree nodes by query string (client-side, case-insensitive substring).
+ * Shows/hides individual sourcetype items and collapses empty subtypes/types.
+ * @param {string} query
+ */
+function filterTree(query) {
+  const clearBtn = document.getElementById('browse-search-clear');
+  clearBtn.classList.toggle('visible', query.length > 0);
+
+  const q = query.trim().toLowerCase();
+  const container = document.getElementById('browse-tree-container');
+
+  // All sourcetype items
+  const items = container.querySelectorAll('.browse-st-item');
+  items.forEach(item => {
+    if (!q) {
+      item.classList.remove('browse-hidden');
+      return;
+    }
+    const name = item.dataset.stName || '';
+    const desc = item.dataset.stDesc || '';
+    item.classList.toggle('browse-hidden', !name.includes(q) && !desc.includes(q));
+  });
+
+  if (!q) {
+    // Restore all sections to visible
+    container.querySelectorAll('.browse-subtype-header, .browse-subcat-header').forEach(h => {
+      h.parentElement.classList.remove('browse-hidden');
+    });
+    container.querySelectorAll('.accordion-item').forEach(ai => {
+      ai.classList.remove('browse-hidden');
+    });
+    return;
+  }
+
+  // Hide subcat sections with no visible items
+  container.querySelectorAll('.browse-subcat-body').forEach(body => {
+    const anyVisible = Array.from(body.querySelectorAll('.browse-st-item'))
+      .some(it => !it.classList.contains('browse-hidden'));
+    const wrap = body.previousElementSibling && body.previousElementSibling.closest
+      ? body.parentElement
+      : body.parentElement;
+    wrap.classList.toggle('browse-hidden', !anyVisible);
+  });
+
+  // Hide subtype sections with no visible items
+  container.querySelectorAll('.browse-subtype-body').forEach(body => {
+    const anyVisible = Array.from(body.querySelectorAll('.browse-st-item'))
+      .some(it => !it.classList.contains('browse-hidden'));
+    const wrap = body.parentElement;
+    wrap.classList.toggle('browse-hidden', !anyVisible);
+  });
+
+  // Hide accordion items with no visible subtypes
+  container.querySelectorAll('.accordion-item').forEach(ai => {
+    const anyVisible = Array.from(ai.querySelectorAll('.browse-st-item'))
+      .some(it => !it.classList.contains('browse-hidden'));
+    ai.classList.toggle('browse-hidden', !anyVisible);
+  });
+}
+
+/** Clear the search input and reset tree visibility. */
+function browseClearSearch() {
+  const input = document.getElementById('browse-search');
+  input.value = '';
+  filterTree('');
+}
+
+// ---- Sourcetype selection + file list ----
+
+/**
+ * Mark a sourcetype as selected, update breadcrumb, and load its files.
+ * @param {string} typeId
+ * @param {string} subtypeId
+ * @param {string|null} subcategoryId
+ * @param {string} sourcetypeId
+ */
+function selectSourcetype(typeId, subtypeId, subcategoryId, sourcetypeId) {
+  browseState.selectedST = { typeId, subtypeId, subcategoryId, sourcetypeId };
+  browseState.selectedFile = null;
+  browseState.previewOffset = 0;
+  browseState.previewPath = null;
+
+  // Deselect all, highlight chosen
+  document.querySelectorAll('.browse-st-item').forEach(el => el.classList.remove('active'));
+  const chosen = document.querySelector(`.browse-st-item[data-st-id="${CSS.escape(sourcetypeId)}"]`);
+  if (chosen) chosen.classList.add('active');
+
+  // Update breadcrumb
+  updateBreadcrumb(typeId, subtypeId, subcategoryId, sourcetypeId);
+
+  // Clear preview
+  document.getElementById('browse-preview-container').innerHTML = '';
+
+  // Load files
+  loadFiles(typeId, subtypeId, subcategoryId, sourcetypeId);
+}
+
+/**
+ * Render the breadcrumb navigation for the selected sourcetype.
+ */
+function updateBreadcrumb(typeId, subtypeId, subcategoryId, sourcetypeId) {
+  if (!browseState.treeData) return;
+  const bc = document.getElementById('browse-breadcrumb');
+
+  // Resolve display names from cached tree data
+  let typeName = typeId, subtypeName = subtypeId, subcatName = null, stName = sourcetypeId;
+
+  const typeNode = (browseState.treeData.types || []).find(t => t.id === typeId);
+  if (typeNode) {
+    typeName = typeNode.display_name || typeId;
+    const subNode = (typeNode.subtypes || []).find(s => s.id === subtypeId);
+    if (subNode) {
+      subtypeName = subNode.display_name || subtypeId;
+      if (subcategoryId) {
+        const catNode = (subNode.subcategories || []).find(c => c.id === subcategoryId);
+        if (catNode) subcatName = catNode.display_name || subcategoryId;
+      }
+      const stList = subcategoryId
+        ? ((subNode.subcategories || []).find(c => c.id === subcategoryId) || {}).sourcetypes || []
+        : subNode.sourcetypes || [];
+      const stNode = stList.find(s => s.id === sourcetypeId);
+      if (stNode) stName = stNode.display_name || sourcetypeId;
+    }
+  }
+
+  const SEP = '<span>/</span>';
+  let parts = [
+    `<span class="bc-seg">${escHtml(typeName)}</span>`,
+    `<span class="bc-seg">${escHtml(subtypeName)}</span>`,
+  ];
+  if (subcatName) parts.push(`<span class="bc-seg">${escHtml(subcatName)}</span>`);
+  parts.push(`<span class="bc-seg bc-last">${escHtml(stName)}</span>`);
+
+  bc.innerHTML = parts.join(SEP);
+}
+
+/**
+ * Fetch and render the file list for a sourcetype.
+ */
+function loadFiles(typeId, subtypeId, subcategoryId, sourcetypeId) {
+  const container = document.getElementById('browse-files-container');
+  container.innerHTML = `
+    <div class="browse-spinner-wrap">
+      <div class="spinner-border spinner-border-sm text-secondary" role="status"></div>
+    </div>`;
+
+  let url = `/api/browse/files?type=${encodeURIComponent(typeId)}&subtype=${encodeURIComponent(subtypeId)}&sourcetype=${encodeURIComponent(sourcetypeId)}`;
+  if (subcategoryId) url += `&subcategory=${encodeURIComponent(subcategoryId)}`;
+
+  fetch(url)
+    .then(r => r.json())
+    .then(data => renderFileList(data))
+    .catch(err => {
+      container.innerHTML = `<div class="browse-empty"><p class="text-danger">Error loading files: ${escHtml(err.message)}</p></div>`;
+    });
+}
+
+/**
+ * Render the file list table from an /api/browse/files response.
+ * @param {{ sourcetype: string, display_name: string, files: Array }} data
+ */
+function renderFileList(data) {
+  const container = document.getElementById('browse-files-container');
+
+  if (!data.files || data.files.length === 0) {
+    container.innerHTML = `
+      <div class="browse-empty">
+        <div class="be-icon">&#128202;</div>
+        <p>No files found for this sourcetype.</p>
+      </div>`;
+    return;
+  }
+
+  const table = document.createElement('table');
+  table.className = 'table table-sm browse-file-table mb-0';
+
+  table.innerHTML = `
+    <thead>
+      <tr>
+        <th>File Name</th>
+        <th>Size</th>
+        <th>Modified</th>
+        <th class="text-end">Lines</th>
+      </tr>
+    </thead>
+    <tbody></tbody>`;
+
+  const tbody = table.querySelector('tbody');
+  data.files.forEach(f => {
+    const tr = document.createElement('tr');
+    tr.dataset.path = f.path;
+    const fname = f.path.split('/').pop();
+    const modDate = f.modified ? f.modified.replace('T', ' ') : '';
+    tr.innerHTML = `
+      <td class="fname">${escHtml(fname)}</td>
+      <td class="fsize">${escHtml(f.size_human)}</td>
+      <td class="fmod">${escHtml(modDate)}</td>
+      <td class="flines">${f.lines.toLocaleString()}</td>`;
+    tr.addEventListener('click', () => {
+      tbody.querySelectorAll('tr').forEach(r => r.classList.remove('active'));
+      tr.classList.add('active');
+      previewFile(f.path);
+    });
+    tbody.appendChild(tr);
+  });
+
+  container.innerHTML = '';
+  container.appendChild(table);
+}
+
+// ---- File preview ----
+
+/**
+ * Fetch and render the first 50 lines of a file in the preview pane.
+ * @param {string} relPath - Relative path within the output directory.
+ */
+function previewFile(relPath) {
+  browseState.selectedFile = relPath;
+  browseState.previewOffset = 0;
+  browseState.previewPath = relPath;
+
+  const container = document.getElementById('browse-preview-container');
+  container.innerHTML = `
+    <div class="browse-preview-wrap">
+      <div class="browse-preview-header">
+        <span class="pv-filename">${escHtml(relPath.split('/').pop())}</span>
+        <span class="text-muted">Loading...</span>
+      </div>
+      <div class="browse-preview-code" id="browse-preview-code"></div>
+    </div>`;
+
+  _fetchPreviewPage(relPath, 0, true);
+}
+
+/**
+ * Load the next 50 lines appended to the existing preview.
+ */
+function loadMorePreview() {
+  if (!browseState.previewPath) return;
+  _fetchPreviewPage(browseState.previewPath, browseState.previewOffset, false);
+}
+
+/**
+ * Internal: fetch a page of preview lines and render them.
+ * @param {string} relPath
+ * @param {number} offset
+ * @param {boolean} replace - true = replace content, false = append
+ */
+function _fetchPreviewPage(relPath, offset, replace) {
+  const url = `/api/browse/preview?path=${encodeURIComponent(relPath)}&offset=${offset}&lines=50`;
+
+  fetch(url)
+    .then(r => r.json())
+    .then(data => {
+      if (data.error) {
+        document.getElementById('browse-preview-container').innerHTML =
+          `<div class="browse-empty"><p class="text-danger">${escHtml(data.error)}</p></div>`;
+        return;
+      }
+
+      browseState.previewOffset = offset + data.lines.length;
+
+      const codeEl = document.getElementById('browse-preview-code');
+      if (!codeEl) return;
+
+      // Update header with total lines info
+      const header = codeEl.closest('.browse-preview-wrap').querySelector('.browse-preview-header');
+      if (header) {
+        header.innerHTML = `
+          <span class="pv-filename">${escHtml(relPath.split('/').pop())}</span>
+          <span class="text-muted">${data.total_lines.toLocaleString()} lines total</span>`;
+      }
+
+      if (replace) {
+        codeEl.innerHTML = '';
+      }
+
+      // Remove old "load more" button if present
+      const oldLoadMore = codeEl.closest('.browse-preview-wrap').querySelector('.browse-load-more-wrap');
+      if (oldLoadMore) oldLoadMore.remove();
+
+      // Render lines
+      const pre = document.createElement('pre');
+      const code = document.createElement('code');
+
+      data.lines.forEach((line, i) => {
+        const lineNum = offset + i + 1;
+        const lineDiv = document.createElement('div');
+        lineDiv.className = 'browse-line';
+
+        const numSpan = document.createElement('span');
+        numSpan.className = 'browse-line-num';
+        numSpan.textContent = lineNum;
+
+        const contentSpan = document.createElement('span');
+        contentSpan.className = 'browse-line-content';
+
+        // Attempt JSON pretty-print
+        const trimmed = line.trim();
+        if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+          try {
+            const parsed = JSON.parse(trimmed);
+            contentSpan.textContent = JSON.stringify(parsed, null, 2);
+            contentSpan.classList.add('json-pretty');
+          } catch (_) {
+            contentSpan.textContent = line;
+          }
+        } else {
+          contentSpan.textContent = line;
+        }
+
+        lineDiv.appendChild(numSpan);
+        lineDiv.appendChild(contentSpan);
+        code.appendChild(lineDiv);
+      });
+
+      pre.appendChild(code);
+      if (replace) {
+        codeEl.appendChild(pre);
+      } else {
+        codeEl.appendChild(pre);
+      }
+
+      // Add "Load more" button if there are more lines
+      const wrap = codeEl.closest('.browse-preview-wrap');
+      if (data.has_more) {
+        const lmWrap = document.createElement('div');
+        lmWrap.className = 'browse-load-more-wrap';
+        lmWrap.innerHTML = `
+          <button class="btn btn-sm btn-outline-secondary w-100" onclick="loadMorePreview()">
+            Load more (showing ${browseState.previewOffset.toLocaleString()} of ${data.total_lines.toLocaleString()} lines)
+          </button>`;
+        wrap.appendChild(lmWrap);
+      } else {
+        const lmWrap = document.createElement('div');
+        lmWrap.className = 'browse-load-more-wrap';
+        lmWrap.innerHTML = `<span class="text-muted small">End of file (${data.total_lines.toLocaleString()} lines)</span>`;
+        wrap.appendChild(lmWrap);
+      }
+
+      // Scroll to bottom if appending
+      if (!replace) codeEl.scrollTop = codeEl.scrollHeight;
+    })
+    .catch(err => {
+      const container = document.getElementById('browse-preview-container');
+      if (container) {
+        container.innerHTML = `<div class="browse-empty"><p class="text-danger">Preview error: ${escHtml(err.message)}</p></div>`;
+      }
+    });
+}
+
+// ---- Utility ----
+
+/**
+ * Escape HTML special characters to prevent XSS.
+ * @param {string} str
+ * @returns {string}
+ */
+function escHtml(str) {
+  if (!str) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
 </script>
 </body>
 </html>
