@@ -191,7 +191,7 @@
   .hql-results-table-wrap { overflow-x: auto; max-height: 380px; overflow-y: auto; }
   .hql-results-table { font-size: 0.78rem; margin: 0; min-width: 100%; }
   .hql-results-table thead th { background: #12192e; color: #8892b0; font-weight: 500;
-    font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.4px; padding: 0.3rem 0.6rem;
+    font-size: 0.72rem; letter-spacing: 0.4px; padding: 0.3rem 0.6rem;
     border-color: #0f3460; white-space: nowrap; position: sticky; top: 0; z-index: 1; }
   .hql-results-table tbody tr:hover td { background: #16213e; }
   .hql-results-table tbody td { border-color: #0f3460; padding: 0.25rem 0.6rem;
@@ -1232,6 +1232,7 @@ function renderFileList(data) {
   table.innerHTML = `
     <thead>
       <tr>
+        <th style="width:30px"><input type="checkbox" id="browse-select-all" title="Select all"></th>
         <th>File Name</th>
         <th>Size</th>
         <th>Modified</th>
@@ -1247,6 +1248,7 @@ function renderFileList(data) {
     const fname = f.path.split('/').pop();
     const modDate = f.modified ? f.modified.replace('T', ' ') : '';
     tr.innerHTML = `
+      <td><input type="checkbox" class="browse-file-check" data-path="${escHtml(f.path)}" onclick="event.stopPropagation()"></td>
       <td class="fname">${escHtml(fname)}</td>
       <td class="fsize">${escHtml(f.size_human)}</td>
       <td class="fmod">${escHtml(modDate)}</td>
@@ -1261,6 +1263,29 @@ function renderFileList(data) {
 
   container.innerHTML = '';
   container.appendChild(table);
+
+  // Select All toggle
+  const selectAll = table.querySelector('#browse-select-all');
+  if (selectAll) {
+    selectAll.addEventListener('change', () => {
+      table.querySelectorAll('.browse-file-check').forEach(cb => {
+        cb.checked = selectAll.checked;
+      });
+      updateQuerySelectedBtn();
+    });
+  }
+
+  // Wire individual checkboxes
+  table.querySelectorAll('.browse-file-check').forEach(cb => {
+    cb.addEventListener('change', updateQuerySelectedBtn);
+  });
+
+  // Add "Query Selected" button bar
+  const btnBar = document.createElement('div');
+  btnBar.id = 'browse-multi-query-bar';
+  btnBar.style.cssText = 'padding: 0.4rem 0.6rem; background: #0d0d1a; border-top: 1px solid #0f3460; display: none;';
+  btnBar.innerHTML = `<button class="btn btn-sm btn-outline-info" id="browse-query-selected-btn" onclick="querySelectedFiles()">Query Selected (<span id="browse-selected-count">0</span> files)</button>`;
+  container.appendChild(btnBar);
 }
 
 // ---- File preview ----
@@ -1442,6 +1467,48 @@ const hqlState = {
   lastQuery: '',
   viewMode: 'table',   // 'table' | 'raw'
 };
+
+/**
+ * Show or hide the "Query Selected" button bar based on how many checkboxes are checked.
+ * Called whenever a browse-file-check checkbox changes state.
+ */
+function updateQuerySelectedBtn() {
+  const checked = document.querySelectorAll('.browse-file-check:checked');
+  const bar = document.getElementById('browse-multi-query-bar');
+  const countSpan = document.getElementById('browse-selected-count');
+  if (bar) bar.style.display = checked.length > 0 ? '' : 'none';
+  if (countSpan) countSpan.textContent = checked.length;
+}
+
+/**
+ * Build a multi-file HQL query from all checked browse-file-check checkboxes and run it.
+ * Generates: database("goose").file("path1", "path2", ...) | take 100
+ */
+function querySelectedFiles() {
+  const checked = document.querySelectorAll('.browse-file-check:checked');
+  if (checked.length === 0) return;
+
+  const paths = Array.from(checked).map(cb => cb.dataset.path.replace(/\\/g, '/'));
+
+  // Show the query editor
+  const editorWrap = document.getElementById('hql-editor-wrap');
+  if (editorWrap) editorWrap.style.display = '';
+
+  // Hide the old raw preview
+  const previewContainer = document.getElementById('browse-preview-container');
+  if (previewContainer) previewContainer.innerHTML = '';
+
+  // Build multi-file query
+  const fileArgs = paths.map(p => `"${p}"`).join(', ');
+  const query = `database("goose").file(${fileArgs}) | take 100`;
+
+  const textarea = document.getElementById('hql-query-textarea');
+  if (textarea) textarea.value = query;
+
+  hqlState.currentFile = paths[0];  // For file-size check context
+  hqlState.currentPage = 1;
+  runBrowseQuery();
+}
 
 /**
  * Auto-populate the query editor with a take-100 query for a file and run it.
