@@ -219,9 +219,18 @@
   .hql-error-msg { padding: 0.5rem 0.75rem; color: #ff6b6b; font-size: 0.82rem; background: #1a0a0a; }
   .hql-spinner-row { text-align: center; padding: 1.5rem; color: #8892b0; }
 
-  /* Field filter context menu */
-  .hql-results-table tbody td { cursor: pointer; }
-  .hql-results-table tbody td:hover { background: #1a2744; }
+  /* Row expand + field filter context menu */
+  .hql-results-table tbody tr { cursor: pointer; }
+  .hql-row-detail { background: #0a0a1a !important; }
+  .hql-row-detail td { padding: 0 !important; cursor: default !important; max-width: none !important;
+    white-space: normal !important; overflow: visible !important; }
+  .hql-row-detail-inner { padding: 0.5rem 0.75rem; max-height: 300px; overflow-y: auto; }
+  .hql-row-detail-inner table { margin: 0; width: 100%; }
+  .hql-row-detail-inner td { border-color: #0f3460; padding: 0.2rem 0.5rem !important;
+    font-family: 'Consolas','Monaco',monospace; font-size: 0.75rem; vertical-align: top;
+    cursor: default !important; max-width: none !important; white-space: normal !important; }
+  .hql-row-detail-inner .rd-key { color: #64ffda; font-weight: 600; width: 200px; white-space: nowrap; }
+  .hql-row-detail-inner .rd-val { color: #ccd6f6; word-break: break-all; white-space: pre-wrap; }
   .hql-field-menu { position: fixed; z-index: 9999; background: #12192e; border: 1px solid #0f3460;
     border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,0.5); padding: 4px 0; min-width: 160px; }
   .hql-field-menu .fm-header { padding: 4px 12px; font-size: 0.7rem; color: #4a5568;
@@ -1714,14 +1723,16 @@ function renderQueryResults(data, mode) {
       `<th title="${escHtml(c)}">${escHtml(c)}</th>`
     ).join('');
 
-    const rows = data.rows.map(row => {
+    // Store row data for expand/detail view
+    hqlState._rowData = data.rows;
+    const rows = data.rows.map((row, idx) => {
       const cells = data.columns.map(col => {
         const val = row[col];
         const display = val === null || val === undefined ? '' : String(val);
         const rawVal = val === null || val === undefined ? '' : (typeof val === 'object' ? JSON.stringify(val) : String(val));
-        return `<td title="${escHtml(display)}" data-col="${escHtml(col)}" data-val="${escHtml(rawVal)}" onclick="showFieldMenu(event, this)">${escHtml(display)}</td>`;
+        return `<td title="${escHtml(display)}" data-col="${escHtml(col)}" data-val="${escHtml(rawVal)}" oncontextmenu="showFieldMenu(event, this)">${escHtml(display)}</td>`;
       }).join('');
-      return `<tr>${cells}</tr>`;
+      return `<tr onclick="toggleRowDetail(this, ${idx})">${cells}</tr>`;
     }).join('');
 
     bodyHtml = `
@@ -1798,9 +1809,68 @@ function toggleResultsExpand() {
   if (btn) btn.textContent = wrap.classList.contains('expanded') ? 'Collapse' : 'Expand';
 }
 
+// ---- Row detail expand (ADX-style) ----
+
+function toggleRowDetail(tr, rowIdx) {
+  // If clicking inside a detail row, ignore
+  if (tr.classList.contains('hql-row-detail')) return;
+
+  // Check if next sibling is already the detail row
+  const next = tr.nextElementSibling;
+  if (next && next.classList.contains('hql-row-detail')) {
+    next.remove();
+    tr.style.borderBottom = '';
+    return;
+  }
+
+  // Close any other open detail rows
+  const tbody = tr.closest('tbody');
+  if (tbody) {
+    tbody.querySelectorAll('.hql-row-detail').forEach(r => r.remove());
+    tbody.querySelectorAll('tr').forEach(r => r.style.borderBottom = '');
+  }
+
+  // Build detail row from stored row data
+  const row = hqlState._rowData && hqlState._rowData[rowIdx];
+  if (!row) return;
+
+  const colCount = tr.children.length;
+  const detailTr = document.createElement('tr');
+  detailTr.className = 'hql-row-detail';
+
+  const detailTd = document.createElement('td');
+  detailTd.colSpan = colCount;
+
+  // Build key-value table
+  const kvRows = Object.entries(row).map(([k, v]) => {
+    let display;
+    if (v === null || v === undefined) {
+      display = '<span style="color:#4a5568">null</span>';
+    } else if (typeof v === 'object') {
+      display = escHtml(JSON.stringify(v, null, 2));
+    } else {
+      display = escHtml(String(v));
+    }
+    return `<tr>
+      <td class="rd-key">${escHtml(k)}</td>
+      <td class="rd-val">${display}</td>
+    </tr>`;
+  }).join('');
+
+  detailTd.innerHTML = `
+    <div class="hql-row-detail-inner">
+      <table class="table table-sm mb-0"><tbody>${kvRows}</tbody></table>
+    </div>`;
+
+  detailTr.appendChild(detailTd);
+  tr.style.borderBottom = '2px solid #64ffda';
+  tr.after(detailTr);
+}
+
 // ---- Field filter context menu ----
 
 function showFieldMenu(event, td) {
+  event.preventDefault();
   event.stopPropagation();
   dismissFieldMenu();
 
