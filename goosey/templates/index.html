@@ -188,7 +188,8 @@
   .hql-results-header { background: #0f3460; padding: 0.3rem 0.75rem; font-size: 0.75rem;
     color: #8892b0; display: flex; justify-content: space-between; align-items: center; }
   .hql-results-info { color: #ccd6f6; }
-  .hql-results-table-wrap { overflow-x: auto; max-height: 380px; overflow-y: auto; }
+  .hql-results-table-wrap { overflow-x: auto; max-height: 65vh; overflow-y: auto; }
+  .hql-results-table-wrap.expanded { max-height: none; }
   .hql-results-table { font-size: 0.78rem; margin: 0; min-width: 100%; }
   .hql-results-table thead th { background: #12192e; color: #8892b0; font-weight: 500;
     font-size: 0.72rem; letter-spacing: 0.4px; padding: 0.3rem 0.6rem;
@@ -202,6 +203,16 @@
   .hql-pagination { display: flex; gap: 4px; align-items: center; }
   .hql-pagination button { background: transparent; border: 1px solid #0f3460; color: #8892b0;
     border-radius: 3px; padding: 2px 10px; font-size: 0.75rem; cursor: pointer; }
+
+  /* Collapsible section controls */
+  .section-toggle { background: none; border: none; color: #8892b0; font-size: 0.7rem;
+    cursor: pointer; padding: 0 6px; opacity: 0.7; }
+  .section-toggle:hover { opacity: 1; color: #64ffda; }
+  .browse-files-section { transition: max-height 0.3s ease; }
+  .browse-files-section.collapsed { max-height: 0; overflow: hidden; }
+  .hql-expand-btn { background: none; border: 1px solid #0f3460; color: #8892b0; font-size: 0.68rem;
+    border-radius: 3px; padding: 1px 8px; cursor: pointer; margin-left: auto; }
+  .hql-expand-btn:hover { color: #64ffda; border-color: #64ffda; }
   .hql-pagination button:hover:not(:disabled) { background: #16213e; color: #ccd6f6; }
   .hql-pagination button:disabled { opacity: 0.35; cursor: not-allowed; }
   .hql-pagination .hql-page-info { color: #6c757d; font-size: 0.75rem; padding: 0 6px; }
@@ -428,7 +439,12 @@
         <!-- RIGHT PANEL: breadcrumb + files + query editor + results -->
         <div class="col-8 browse-right-panel">
           <div class="browse-breadcrumb" id="browse-breadcrumb"></div>
-          <div id="browse-files-container">
+          <div id="browse-files-section-header" style="display:none; background:#0f3460; padding:0.25rem 0.75rem; border-radius:6px 6px 0 0; margin-bottom:0; cursor:pointer; user-select:none;"
+               onclick="toggleFilesSection()">
+            <span style="color:#64ffda; font-weight:600; font-size:0.78rem;">Files</span>
+            <button class="section-toggle" id="browse-files-toggle" title="Collapse/expand file list">&#9660;</button>
+          </div>
+          <div id="browse-files-container" class="browse-files-section">
             <div class="browse-empty">
               <div class="be-icon">&#128193;</div>
               <p>Select a sourcetype from the tree to view files.</p>
@@ -444,6 +460,7 @@
                 <code>summarize count() by</code> &nbsp;|&nbsp;
                 <code>sort by</code> &nbsp;|&nbsp; <code>take</code>
               </span>
+              <button class="hql-expand-btn" onclick="toggleQueryExpand()" id="hql-query-expand-btn" title="Expand query editor">Expand</button>
             </div>
             <textarea class="hql-query-textarea" id="hql-query-textarea" rows="2"
               placeholder="database(&quot;goose&quot;).file(&quot;path/to/file.json&quot;) | take 100"></textarea>
@@ -1216,6 +1233,11 @@ function loadFiles(typeId, subtypeId, subcategoryId, sourcetypeId) {
  */
 function renderFileList(data) {
   const container = document.getElementById('browse-files-container');
+  showFilesSectionHeader();
+  // Ensure file section is visible when new files load
+  container.classList.remove('collapsed');
+  const toggle = document.getElementById('browse-files-toggle');
+  if (toggle) toggle.innerHTML = '&#9660;';
 
   if (!data.files || data.files.length === 0) {
     container.innerHTML = `
@@ -1711,6 +1733,7 @@ function renderQueryResults(data, mode) {
       <div class="hql-results-header">
         <span class="hql-results-info">${rangeInfo}</span>
         <span class="text-muted" style="font-size:0.7rem">${data.columns.length} column${data.columns.length !== 1 ? 's' : ''}</span>
+        <button class="hql-expand-btn" onclick="toggleResultsExpand()" id="hql-results-expand-btn" title="Expand results table">Expand</button>
       </div>
       ${bodyHtml}
       <div class="hql-results-footer">
@@ -1720,6 +1743,44 @@ function renderQueryResults(data, mode) {
         </span>
       </div>
     </div>`;
+}
+
+// ---- Section collapse/expand controls ----
+
+function toggleFilesSection() {
+  const container = document.getElementById('browse-files-container');
+  const toggle = document.getElementById('browse-files-toggle');
+  if (!container) return;
+  container.classList.toggle('collapsed');
+  if (toggle) toggle.innerHTML = container.classList.contains('collapsed') ? '&#9654;' : '&#9660;';
+}
+
+function showFilesSectionHeader() {
+  const header = document.getElementById('browse-files-section-header');
+  if (header) header.style.display = 'flex';
+}
+
+function toggleQueryExpand() {
+  const textarea = document.getElementById('hql-query-textarea');
+  const btn = document.getElementById('hql-query-expand-btn');
+  if (!textarea) return;
+  if (textarea.style.maxHeight === 'none') {
+    textarea.style.maxHeight = '200px';
+    textarea.rows = 2;
+    if (btn) btn.textContent = 'Expand';
+  } else {
+    textarea.style.maxHeight = 'none';
+    textarea.rows = 12;
+    if (btn) btn.textContent = 'Collapse';
+  }
+}
+
+function toggleResultsExpand() {
+  const wrap = document.querySelector('.hql-results-table-wrap');
+  const btn = document.getElementById('hql-results-expand-btn');
+  if (!wrap) return;
+  wrap.classList.toggle('expanded');
+  if (btn) btn.textContent = wrap.classList.contains('expanded') ? 'Collapse' : 'Expand';
 }
 </script>
 </body>
