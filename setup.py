@@ -1,3 +1,9 @@
+"""Goosey package setup configuration.
+
+Defines package metadata, dependencies, console entry points, and package_data
+(templates and data files shipped with the distribution).
+"""
+
 import sys
 
 from os import path
@@ -24,7 +30,7 @@ setup(name='goosey',
           'Programming Language :: Python :: 3.13',
       ],
       packages=['goosey'],
-      package_data={'goosey': ['templates/*']},
+      package_data={'goosey': ['templates/*', 'data/*']},
       python_requires='>=3.9',
       install_requires=requirements,
       zip_safe=False,
