@@ -80,6 +80,10 @@ try:
                 from Hql.Exceptions import HqlExceptions as hqle
                 raise hqle.QueryException('Could not load data from file')
         f.close()
+        # Wrap single-object JSON files (e.g. EXO_TransportConfig) into a list
+        # so pyhql's Schema/Table can iterate over rows, not dict keys.
+        if isinstance(data, dict):
+            data = [data]
         limit = self.get_limit(name)
         if limit is not None:
             data = data[:limit]
