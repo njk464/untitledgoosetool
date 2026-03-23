@@ -214,8 +214,8 @@
           }
         },
         "d4iot": {
-          "display_name": "Defender for IoT",
-          "description": "Defender for IoT sensor portal data: alerts, device groups, sites, and settings",
+          "display_name": "Defender for IoT (Portal)",
+          "description": "Defender for IoT Azure portal data: alerts, device groups, sites, settings, and D4IoT portal PCAPs/configs",
           "sourcetypes": {
             "d4iot:alerts": {
               "display_name": "Alerts",
@@ -241,6 +241,80 @@
               "display_name": "Sites",
               "description": "Data collected via azure dumper",
               "file_glob": "azure/{sub_id}/portal_sites*json"
+            }
+          }
+        },
+        "rbac": {
+          "display_name": "RBAC",
+          "description": "Azure role-based access control: role assignments and role definitions per subscription",
+          "sourcetypes": {
+            "rbac:roleassignments": {
+              "display_name": "Role Assignments",
+              "description": "Data collected via azure dumper (dump_rbac_role_assignments)",
+              "file_glob": "azure/{sub_id}/rbac_role_assignments.json"
+            },
+            "rbac:roledefinitions": {
+              "display_name": "Role Definitions",
+              "description": "Data collected via azure dumper (dump_rbac_role_definitions)",
+              "file_glob": "azure/{sub_id}/rbac_role_definitions.json"
+            }
+          }
+        },
+        "sentinel": {
+          "display_name": "Microsoft Sentinel",
+          "description": "Microsoft Sentinel incidents, analytics rules, and data connectors collected from Log Analytics workspaces",
+          "sourcetypes": {
+            "sentinel:incidents": {
+              "display_name": "Incidents",
+              "description": "Data collected via azure dumper (dump_sentinel_incidents)",
+              "file_glob": "azure/{sub_id}/sentinel/incidents.json"
+            },
+            "sentinel:analyticsrules": {
+              "display_name": "Analytics Rules",
+              "description": "Data collected via azure dumper (dump_sentinel_analytics_rules)",
+              "file_glob": "azure/{sub_id}/sentinel/analytics_rules.json"
+            },
+            "sentinel:dataconnectors": {
+              "display_name": "Data Connectors",
+              "description": "Data collected via azure dumper (dump_sentinel_data_connectors)",
+              "file_glob": "azure/{sub_id}/sentinel/data_connectors.json"
+            }
+          }
+        },
+        "vnetflow": {
+          "display_name": "VNet Flow Logs",
+          "description": "VNet flow log data from NTANetAnalytics and NTANetAnalytics_CL tables in Log Analytics workspaces (replacement for NSG flow logs)",
+          "sourcetypes": {
+            "vnetflow:ntanetanalytics": {
+              "display_name": "NTANetAnalytics",
+              "description": "Data collected via azure dumper (dump_vnet_flow_logs) from NTANetAnalytics table",
+              "file_glob": "azure/{sub_id}/vnet_flow_logs/*/NTANetAnalytics.json"
+            },
+            "vnetflow:ntanetanalytics_cl": {
+              "display_name": "NTANetAnalytics CL",
+              "description": "Data collected via azure dumper (dump_vnet_flow_logs) from NTANetAnalytics_CL custom table",
+              "file_glob": "azure/{sub_id}/vnet_flow_logs/*/NTANetAnalytics_CL.json"
+            }
+          }
+        },
+        "resourcehistory": {
+          "display_name": "Resource History",
+          "description": "Azure Resource Graph change history and ARM deployment history",
+          "sourcetypes": {
+            "resourcehistory:graphchanges": {
+              "display_name": "Resource Graph Changes",
+              "description": "Data collected via azure dumper (dump_resource_graph_changes) — 14-day cross-subscription change history",
+              "file_glob": "azure/resource_graph_changes.json"
+            },
+            "resourcehistory:deploymenthistory": {
+              "display_name": "Deployment History",
+              "description": "Data collected via azure dumper (dump_deployment_history) — ARM deployment records per subscription",
+              "file_glob": "azure/{sub_id}/deployment_history.json"
+            },
+            "resourcehistory:vmextensions": {
+              "display_name": "VM Extensions",
+              "description": "Data collected via azure dumper (dump_vm_extensions) — extensions installed on all VMs per subscription",
+              "file_glob": "azure/{sub_id}/vm_extensions.json"
             }
           }
         },
@@ -4814,10 +4888,20 @@
               "description": "Data collected via m365 dumper",
               "file_glob": "m365/ual_*json"
             },
+            "ual_graph": {
+              "display_name": "UAL Graph",
+              "description": "Data collected via m365 dumper (dump_ual_graph) — UAL collected via Microsoft Graph /security/auditLog/queries (not available in GCC/GCC-High)",
+              "file_glob": "m365/ual_graph_*json"
+            },
             "psinboxrules": {
               "display_name": "Psinboxrules",
               "description": "Data collected via m365 dumper",
               "file_glob": "m365/EXO_InboxRules_PowerShell*json"
+            },
+            "message_trace": {
+              "display_name": "Message Trace",
+              "description": "Data collected via m365 dumper (dump_message_trace) — Exchange Online mail flow records in 10-day chunks",
+              "file_glob": "m365/message_trace/message_trace_*.json"
             }
           }
         },
@@ -4967,6 +5051,11 @@
               "description": "Data collected via mde dumper",
               "file_glob": "mde/security_incidents*json"
             },
+            "api_incidents": {
+              "display_name": "XDR Incidents",
+              "description": "Data collected via mde dumper (dump_incidents) — Defender XDR correlated incidents from /api/incidents",
+              "file_glob": "mde/api_incidents*json"
+            },
             "investigations": {
               "display_name": "Investigations",
               "description": "Data collected via mde dumper",
@@ -4976,6 +5065,21 @@
               "display_name": "Machines",
               "description": "Data collected via mde dumper",
               "file_glob": "mde/api_machines*json"
+            },
+            "machine_actions": {
+              "display_name": "Machine Actions",
+              "description": "Data collected via mde dumper (dump_machine_actions) — containment and remediation response actions",
+              "file_glob": "mde/api_machineactions*json"
+            },
+            "library_files": {
+              "display_name": "Library Files",
+              "description": "Data collected via mde dumper (dump_library_files) — custom detection library files",
+              "file_glob": "mde/api_libraryfiles*json"
+            },
+            "machine_vulns": {
+              "display_name": "Machine Vulnerabilities",
+              "description": "Data collected via mde dumper (dump_machine_vulns) — per-machine vulnerability inventory",
+              "file_glob": "mde/api_vulnerabilities_machinesVulnerabilities*json"
             },
             "recommendations": {
               "display_name": "Recommendations",
@@ -4991,6 +5095,32 @@
               "display_name": "Vulnerabilities",
               "description": "Data collected via mde dumper",
               "file_glob": "mde/api_vulnerabilities*json"
+            }
+          }
+        },
+        "per_machine": {
+          "display_name": "Per-Machine Data",
+          "description": "Per-device alerts, missing patches, and machine timelines collected from MDE REST API and portal",
+          "sourcetypes": {
+            "machine_alerts": {
+              "display_name": "Machine Alerts",
+              "description": "Data collected via mde dumper (dump_machine_alerts) — per-device alert JSONL files",
+              "file_glob": "mde/machine_alerts/*_alerts.json"
+            },
+            "missing_kbs": {
+              "display_name": "Missing KBs",
+              "description": "Data collected via mde dumper (dump_missing_kbs) — per-device missing security patches",
+              "file_glob": "mde/missing_kbs/*_missing_kbs.json"
+            },
+            "machine_timeline": {
+              "display_name": "Machine Timeline",
+              "description": "Data collected via mde dumper (dump_machine_timeline) — per-device portal timeline events (requires portal auth)",
+              "file_glob": "mde/machine_timeline/*_timeline.jsonl"
+            },
+            "identity_timeline": {
+              "display_name": "Identity Timeline",
+              "description": "Data collected via mde dumper (dump_identity_timeline) — per-identity portal timeline events (requires portal auth)",
+              "file_glob": "mde/identity_timeline/*_timeline.jsonl"
             }
           }
         },
@@ -5222,6 +5352,89 @@
               "display_name": "Urlclickevents",
               "description": "Data collected via mde dumper",
               "file_glob": "mde/UrlClickEvents/UrlClickEvents*json"
+            }
+          }
+        }
+      }
+    },
+    "d4iot": {
+      "display_name": "Defender for IoT (Sensor/Mgmt)",
+      "description": "Defender for IoT sensor API and management console data: devices, alerts, CVEs, vulnerabilities, events, and PCAPs",
+      "subtypes": {
+        "sensor": {
+          "display_name": "Sensor API",
+          "description": "Data collected directly from D4IoT sensor REST API (requires sensor API token)",
+          "sourcetypes": {
+            "sensor:devices": {
+              "display_name": "Sensor Devices",
+              "description": "Data collected via d4iot dumper (dump_sensor_devices) — device inventory from sensor /api/v1/devices",
+              "file_glob": "d4iot/sensor/devices.json"
+            },
+            "sensor:alerts": {
+              "display_name": "Sensor Alerts",
+              "description": "Data collected via d4iot dumper (dump_sensor_alerts) — alerts from sensor /api/v1/alerts",
+              "file_glob": "d4iot/sensor/alerts.json"
+            },
+            "sensor:deviceconnections": {
+              "display_name": "Sensor Device Connections",
+              "description": "Data collected via d4iot dumper (dump_sensor_device_connections) — device connections from sensor",
+              "file_glob": "d4iot/sensor/device_connections.json"
+            },
+            "sensor:devicecves": {
+              "display_name": "Sensor Device CVEs",
+              "description": "Data collected via d4iot dumper (dump_sensor_device_cves) — known CVEs per device",
+              "file_glob": "d4iot/sensor/devices_cves.json"
+            },
+            "sensor:events": {
+              "display_name": "Sensor Events",
+              "description": "Data collected via d4iot dumper (dump_sensor_events) — events from sensor /api/v1/events",
+              "file_glob": "d4iot/sensor/events.json"
+            },
+            "sensor:devicevuln": {
+              "display_name": "Sensor Device Vulnerabilities",
+              "description": "Data collected via d4iot dumper (dump_sensor_device_vuln) — device vulnerability report",
+              "file_glob": "d4iot/sensor/device_vulnerabilities.json"
+            },
+            "sensor:securityvuln": {
+              "display_name": "Sensor Security Vulnerabilities",
+              "description": "Data collected via d4iot dumper (dump_sensor_security_vuln) — security vulnerability report",
+              "file_glob": "d4iot/sensor/security_vulnerabilities.json"
+            },
+            "sensor:operationalvuln": {
+              "display_name": "Sensor Operational Vulnerabilities",
+              "description": "Data collected via d4iot dumper (dump_sensor_operational_vuln) — operational vulnerability report",
+              "file_glob": "d4iot/sensor/operational_vulnerabilities.json"
+            },
+            "sensor:pcap": {
+              "display_name": "Sensor Alert PCAPs",
+              "description": "Data collected via d4iot dumper (dump_sensor_pcap) — per-alert PCAP files from sensor",
+              "file_glob": "d4iot/sensor_alert_pcaps/alert_*.pcap"
+            }
+          }
+        },
+        "mgmt": {
+          "display_name": "Management Console API",
+          "description": "Data collected from D4IoT management console REST API (requires mgmt API token)",
+          "sourcetypes": {
+            "mgmt:devices": {
+              "display_name": "Mgmt Devices",
+              "description": "Data collected via d4iot dumper (dump_mgmt_devices) — device inventory from management console",
+              "file_glob": "d4iot/mgmt_console/mgmt_devices.json"
+            },
+            "mgmt:alerts": {
+              "display_name": "Mgmt Alerts",
+              "description": "Data collected via d4iot dumper (dump_mgmt_alerts) — alerts from management console",
+              "file_glob": "d4iot/mgmt_console/mgmt_alerts.json"
+            },
+            "mgmt:sensorinfo": {
+              "display_name": "Mgmt Sensor Info",
+              "description": "Data collected via d4iot dumper (dump_mgmt_sensor_info) — sensor inventory from management console",
+              "file_glob": "d4iot/mgmt_console/sensor_info.json"
+            },
+            "mgmt:pcap": {
+              "display_name": "Mgmt Alert PCAPs",
+              "description": "Data collected via d4iot dumper (dump_mgmt_pcap) — per-alert PCAP files from management console",
+              "file_glob": "d4iot/mgmt_console_alert_pcaps/*.pcap"
             }
           }
         }
