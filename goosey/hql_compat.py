@@ -92,30 +92,71 @@ try:
     _json_db_mod.JSON.load_data = _patched_load_data
 
     # ------------------------------------------------------------------
-    # Monkey-patch: bump Schema sample_size to reduce type-inference mismatches
+    # Monkey-patch: resilient Table.__init__ for overflow/type errors
     # ------------------------------------------------------------------
-    # pyhql's Table.__init__ calls Schema(init_data, sample_size=100), which
-    # only inspects 100 rows when inferring column types.  UAL and other
-    # heterogeneous NDJSON files often have fields that are null in the first
-    # 100 rows and populated later, causing schema mismatches at query time.
-    # We intercept Schema.__init__ and ensure sample_size is at least 10000.
+    # pyhql maps Python int→Polars Int32 and builds a strict schema.
+    # Forensic data often has values exceeding Int32 or even Int64 (EXO
+    # InboxRules identifiers can be >2^63).  Rather than patching every
+    # type individually, we wrap Table.__init__ to catch ComputeError
+    # from pl.from_dicts() and retry WITHOUT a schema, letting Polars
+    # infer types natively (it uses Int64 by default and falls back to
+    # Utf8 for overflow).  The Schema is then rebuilt from the DataFrame.
     #
-    # @decision DEC-HQL-004
-    # @title Bump Schema sample_size to 10000 via monkey-patch
+    # @decision DEC-HQL-005
+    # @title Resilient Table init with schemaless fallback
     # @status accepted
-    # @rationale pyhql hardcodes sample_size=100 in Table.__init__.  We cannot
-    #   override it via a public API, so we patch Schema.__init__ to clamp the
-    #   value upwards.  10000 rows is still fast for JSONL files up to ~1 GB
-    #   while dramatically reducing schema-mismatch errors on UAL exports.
+    # @rationale Forensic exports contain arbitrary integer sizes and
+    #   heterogeneous types that defeat any fixed schema mapping.  A
+    #   try/fallback approach handles all cases without needing to
+    #   anticipate every data anomaly.
+    import polars as pl
     _data_mod = importlib.import_module('Hql.Data')
-    _OrigSchema = _data_mod.Schema
-    _orig_schema_init = _OrigSchema.__init__
+    _Table = _data_mod.Table
+    _orig_table_init = _Table.__init__
 
-    def _patched_schema_init(self, data=None, schema=None, sample_size=1):
-        """Schema __init__ wrapper that bumps sample_size to at least 10000."""
-        _orig_schema_init(self, data=data, schema=schema, sample_size=max(sample_size, 10000))
+    def _flatten_for_polars(rows):
+        """Convert nested dicts/lists to JSON strings so Polars can ingest."""
+        flat = []
+        for row in rows:
+            new_row = {}
+            for k, v in row.items():
+                if isinstance(v, (dict, list)):
+                    new_row[k] = json.dumps(v, default=str)
+                else:
+                    new_row[k] = v
+            flat.append(new_row)
+        return flat
 
-    _OrigSchema.__init__ = _patched_schema_init
+    def _init_table_fields(self, kwargs, df):
+        """Set required Table fields after manual DataFrame construction."""
+        self.df = df
+        self.schema = _data_mod.Schema(data=self.df)
+        self.name = kwargs.get('name', '')
+        self.series = None
+        self.agg = None
+        self.agg_paths = []
+        self.agg_schema = _data_mod.Schema()
+
+    def _patched_table_init(self, **kwargs):
+        try:
+            _orig_table_init(self, **kwargs)
+        except (pl.exceptions.ComputeError, pl.exceptions.SchemaError,
+                OverflowError, TypeError, Exception) as first_err:
+            init_data = kwargs.get('init_data')
+            if init_data is None:
+                raise
+            # Fallback 1: let Polars infer schema natively
+            try:
+                df = pl.from_dicts(init_data, infer_schema_length=len(init_data))
+                _init_table_fields(self, kwargs, df)
+            except Exception:
+                # Fallback 2: flatten nested dicts/lists to JSON strings
+                flat = _flatten_for_polars(init_data)
+                df = pl.from_dicts(flat, infer_schema_length=len(flat))
+                _init_table_fields(self, kwargs, df)
+
+    _Table.__init__ = _patched_table_init
+
 except ImportError:
     pass  # pyhql or ndjson not installed; errors will surface at query time
 
