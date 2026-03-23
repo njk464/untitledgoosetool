@@ -597,6 +597,58 @@ def api_browse_files():
     })
 
 
+@app.route('/api/browse/query', methods=['POST'])
+def api_browse_query():
+    """Execute an HQL query against collected data files.
+
+    Accepts a JSON body with:
+        query      (str, required): HQL query string.  May or may not include
+                   the ``database("goose").file(...)`` prefix.
+        file       (str, optional): Relative path within output_dir.  Required
+                   when ``query`` does not start with ``database(``.
+        page       (int, optional): 1-based result page (default 1).
+        page_size  (int, optional): Rows per page, max 1000 (default 100).
+
+    Returns:
+        200 JSON: {columns, rows, total, page, pages, query}
+        400 JSON: {error} for user-recoverable query failures or bad parameters.
+        500 JSON: {error} for unexpected server-side errors.
+    """
+    data = request.get_json(silent=True) or {}
+    query = (data.get('query') or '').strip()
+    file_path = (data.get('file') or '').strip()
+    try:
+        page = max(1, int(data.get('page', 1)))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        page_size = min(max(1, int(data.get('page_size', 100))), 1000)
+    except (TypeError, ValueError):
+        page_size = 100
+
+    if not query:
+        return jsonify({'error': 'Required field: query'}), 400
+
+    output_dir = _get_output_dir()
+
+    try:
+        from goosey.hql_compat import run_hql_query
+        result = run_hql_query(
+            query,
+            output_dir,
+            file_path=file_path or None,
+            page=page,
+            page_size=page_size,
+        )
+        return jsonify(result)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except ImportError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except Exception as exc:
+        return jsonify({'error': f'Query failed: {exc}'}), 500
+
+
 @app.route('/api/browse/preview')
 def api_browse_preview():
     """Return the first N lines of a data file with optional offset for pagination.

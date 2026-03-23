@@ -156,6 +156,57 @@
 
   /* Spinner overlay */
   .browse-spinner-wrap { text-align: center; padding: 3rem; color: #8892b0; }
+
+  /* ---- HQL Query Editor ---- */
+  .hql-editor-wrap { margin-top: 0.75rem; border: 1px solid #0f3460; border-radius: 6px; overflow: hidden; }
+  .hql-editor-header { background: #0f3460; padding: 0.3rem 0.75rem; font-size: 0.75rem;
+    color: #8892b0; display: flex; justify-content: space-between; align-items: center; }
+  .hql-editor-header .hql-title { color: #64ffda; font-weight: 600; font-size: 0.78rem; letter-spacing: 0.5px; }
+  .hql-editor-header .hql-help { color: #6c757d; font-size: 0.72rem; }
+  .hql-query-textarea {
+    width: 100%; background: #0a0a1a; border: none; border-bottom: 1px solid #0f3460;
+    color: #a8ff78; font-family: 'Consolas', 'Monaco', monospace; font-size: 0.8rem;
+    padding: 0.5rem 0.75rem; resize: vertical; min-height: 56px; max-height: 200px;
+    outline: none; line-height: 1.5;
+  }
+  .hql-query-textarea:focus { background: #0d0d1a; }
+  .hql-query-textarea::placeholder { color: #4a5568; }
+  .hql-editor-footer { background: #0d0d1a; padding: 0.35rem 0.75rem; display: flex;
+    align-items: center; gap: 0.5rem; border-top: 1px solid #0f3460; }
+  .hql-run-btn { background: #64ffda; color: #1a1a2e; border: none; border-radius: 4px;
+    padding: 3px 14px; font-weight: 600; font-size: 0.8rem; cursor: pointer; white-space: nowrap; }
+  .hql-run-btn:hover { background: #52d9c0; }
+  .hql-run-btn:disabled { background: #2a5a52; color: #4a8a82; cursor: not-allowed; }
+  .hql-shortcut-hint { font-size: 0.7rem; color: #4a5568; }
+  .hql-view-toggle { margin-left: auto; display: flex; gap: 4px; }
+  .hql-view-toggle button { background: transparent; border: 1px solid #0f3460; color: #8892b0;
+    border-radius: 3px; padding: 2px 10px; font-size: 0.75rem; cursor: pointer; }
+  .hql-view-toggle button.active { background: #0f3460; color: #64ffda; border-color: #64ffda; }
+
+  /* ---- HQL Results Table ---- */
+  .hql-results-wrap { margin-top: 0.5rem; border: 1px solid #0f3460; border-radius: 6px; overflow: hidden; }
+  .hql-results-header { background: #0f3460; padding: 0.3rem 0.75rem; font-size: 0.75rem;
+    color: #8892b0; display: flex; justify-content: space-between; align-items: center; }
+  .hql-results-info { color: #ccd6f6; }
+  .hql-results-table-wrap { overflow-x: auto; max-height: 380px; overflow-y: auto; }
+  .hql-results-table { font-size: 0.78rem; margin: 0; min-width: 100%; }
+  .hql-results-table thead th { background: #12192e; color: #8892b0; font-weight: 500;
+    font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.4px; padding: 0.3rem 0.6rem;
+    border-color: #0f3460; white-space: nowrap; position: sticky; top: 0; z-index: 1; }
+  .hql-results-table tbody tr:hover td { background: #16213e; }
+  .hql-results-table tbody td { border-color: #0f3460; padding: 0.25rem 0.6rem;
+    font-family: 'Consolas', 'Monaco', monospace; font-size: 0.78rem; color: #ccd6f6;
+    max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hql-results-footer { background: #0d0d1a; padding: 0.35rem 0.75rem; display: flex;
+    justify-content: space-between; align-items: center; border-top: 1px solid #0f3460; }
+  .hql-pagination { display: flex; gap: 4px; align-items: center; }
+  .hql-pagination button { background: transparent; border: 1px solid #0f3460; color: #8892b0;
+    border-radius: 3px; padding: 2px 10px; font-size: 0.75rem; cursor: pointer; }
+  .hql-pagination button:hover:not(:disabled) { background: #16213e; color: #ccd6f6; }
+  .hql-pagination button:disabled { opacity: 0.35; cursor: not-allowed; }
+  .hql-pagination .hql-page-info { color: #6c757d; font-size: 0.75rem; padding: 0 6px; }
+  .hql-error-msg { padding: 0.5rem 0.75rem; color: #ff6b6b; font-size: 0.82rem; background: #1a0a0a; }
+  .hql-spinner-row { text-align: center; padding: 1.5rem; color: #8892b0; }
 </style>
 </head>
 <body>
@@ -374,7 +425,7 @@
           </div>
         </div>
 
-        <!-- RIGHT PANEL: breadcrumb + files + preview -->
+        <!-- RIGHT PANEL: breadcrumb + files + query editor + results -->
         <div class="col-8 browse-right-panel">
           <div class="browse-breadcrumb" id="browse-breadcrumb"></div>
           <div id="browse-files-container">
@@ -383,6 +434,33 @@
               <p>Select a sourcetype from the tree to view files.</p>
             </div>
           </div>
+
+          <!-- HQL Query Editor -->
+          <div class="hql-editor-wrap" id="hql-editor-wrap" style="display:none">
+            <div class="hql-editor-header">
+              <span class="hql-title">HQL Query</span>
+              <span class="hql-help">
+                <code>where</code> &nbsp;|&nbsp; <code>project</code> &nbsp;|&nbsp;
+                <code>summarize count() by</code> &nbsp;|&nbsp;
+                <code>sort by</code> &nbsp;|&nbsp; <code>take</code>
+              </span>
+            </div>
+            <textarea class="hql-query-textarea" id="hql-query-textarea" rows="2"
+              placeholder="database(&quot;goose&quot;).file(&quot;path/to/file.json&quot;) | take 100"></textarea>
+            <div class="hql-editor-footer">
+              <button class="hql-run-btn" id="hql-run-btn" onclick="runBrowseQuery()">Run Query</button>
+              <span class="hql-shortcut-hint">Ctrl+Enter to run</span>
+              <div class="hql-view-toggle" id="hql-view-toggle" style="display:none">
+                <button id="hql-view-table-btn" class="active" onclick="setHqlView('table')">Table</button>
+                <button id="hql-view-raw-btn" onclick="setHqlView('raw')">Raw</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- HQL Results -->
+          <div id="hql-results-container"></div>
+
+          <!-- Raw preview (shown in Raw view mode or when HQL is not active) -->
           <div id="browse-preview-container"></div>
         </div>
 
@@ -706,6 +784,17 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('browse-tab-link').addEventListener('shown.bs.tab', () => {
     if (!browseState.treeLoaded && !browseState.treeLoading) {
       loadBrowseTree();
+    }
+  });
+
+  // Ctrl+Enter keyboard shortcut for the HQL query textarea
+  document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      const active = document.activeElement;
+      if (active && active.id === 'hql-query-textarea') {
+        e.preventDefault();
+        runBrowseQuery();
+      }
     }
   });
 });
@@ -1165,7 +1254,7 @@ function renderFileList(data) {
     tr.addEventListener('click', () => {
       tbody.querySelectorAll('tr').forEach(r => r.classList.remove('active'));
       tr.classList.add('active');
-      previewFile(f.path);
+      autoTableFile(f.path);
     });
     tbody.appendChild(tr);
   });
@@ -1329,6 +1418,241 @@ function escHtml(str) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+// ============================================================
+// HQL QUERY INTEGRATION
+// @decision DEC-HQL-004
+// @title Auto-table on file click with inline query editor
+// @status accepted
+// @rationale Clicking a file in the tree immediately executes
+//   `| take 100` so analysts see data without needing to type a
+//   query first.  The query is visible and editable so analysts
+//   can refine it.  Pagination is done server-side (page/page_size
+//   parameters) to avoid sending large result sets to the client.
+// ============================================================
+
+/** HQL query state */
+const hqlState = {
+  currentFile: null,   // relative path currently targeted
+  currentPage: 1,
+  currentPageSize: 100,
+  totalRows: 0,
+  totalPages: 1,
+  lastQuery: '',
+  viewMode: 'table',   // 'table' | 'raw'
+};
+
+/**
+ * Auto-populate the query editor with a take-100 query for a file and run it.
+ * Called when a file row is clicked in the Browse Data tab.
+ * @param {string} relPath - Relative path within output_dir.
+ */
+function autoTableFile(relPath) {
+  hqlState.currentFile = relPath;
+  hqlState.currentPage = 1;
+
+  // Show the query editor
+  const editorWrap = document.getElementById('hql-editor-wrap');
+  if (editorWrap) editorWrap.style.display = '';
+
+  // Hide the old raw preview
+  const previewContainer = document.getElementById('browse-preview-container');
+  if (previewContainer) previewContainer.innerHTML = '';
+
+  // Set the query text
+  const normPath = relPath.replace(/\\/g, '/');
+  const textarea = document.getElementById('hql-query-textarea');
+  if (textarea) {
+    textarea.value = `database("goose").file("${normPath}") | take 100`;
+  }
+
+  // Auto-run
+  runBrowseQuery();
+}
+
+/**
+ * Execute the HQL query in the editor and render results.
+ */
+function runBrowseQuery() {
+  const textarea = document.getElementById('hql-query-textarea');
+  if (!textarea) return;
+  const query = textarea.value.trim();
+  if (!query) return;
+
+  hqlState.lastQuery = query;
+  hqlState.currentPage = 1;
+  _executeHqlQuery(query, 1);
+}
+
+/**
+ * Navigate to a specific page of the current query results.
+ * @param {number} page
+ */
+function loadQueryPage(page) {
+  if (page < 1 || page > hqlState.totalPages) return;
+  hqlState.currentPage = page;
+  _executeHqlQuery(hqlState.lastQuery, page);
+}
+
+/**
+ * Switch between Table and Raw view modes.
+ * @param {'table'|'raw'} mode
+ */
+function setHqlView(mode) {
+  hqlState.viewMode = mode;
+  document.getElementById('hql-view-table-btn').classList.toggle('active', mode === 'table');
+  document.getElementById('hql-view-raw-btn').classList.toggle('active', mode === 'raw');
+  // Re-render the cached results with the new mode
+  if (hqlState._lastResult) {
+    renderQueryResults(hqlState._lastResult, mode);
+  }
+}
+
+/**
+ * Internal: POST to /api/browse/query and render results.
+ * @param {string} query
+ * @param {number} page
+ */
+function _executeHqlQuery(query, page) {
+  const runBtn = document.getElementById('hql-run-btn');
+  const resultsContainer = document.getElementById('hql-results-container');
+
+  if (runBtn) runBtn.disabled = true;
+
+  // Show loading spinner in results area
+  if (resultsContainer) {
+    resultsContainer.innerHTML = `
+      <div class="hql-results-wrap">
+        <div class="hql-spinner-row">
+          <div class="spinner-border spinner-border-sm text-secondary" role="status"></div>
+          <span class="ms-2 small">Running query…</span>
+        </div>
+      </div>`;
+  }
+
+  fetch('/api/browse/query', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      query: query,
+      file: hqlState.currentFile || '',
+      page: page,
+      page_size: hqlState.currentPageSize,
+    }),
+  })
+    .then(r => r.json())
+    .then(data => {
+      if (runBtn) runBtn.disabled = false;
+      if (data.error) {
+        if (resultsContainer) {
+          resultsContainer.innerHTML = `
+            <div class="hql-results-wrap">
+              <div class="hql-error-msg">&#9888; ${escHtml(data.error)}</div>
+            </div>`;
+        }
+        return;
+      }
+      hqlState.totalRows = data.total;
+      hqlState.totalPages = data.pages;
+      hqlState.currentPage = data.page;
+      hqlState._lastResult = data;
+
+      // Show the view toggle now that we have results
+      const viewToggle = document.getElementById('hql-view-toggle');
+      if (viewToggle) viewToggle.style.display = '';
+
+      renderQueryResults(data, hqlState.viewMode);
+    })
+    .catch(err => {
+      if (runBtn) runBtn.disabled = false;
+      if (resultsContainer) {
+        resultsContainer.innerHTML = `
+          <div class="hql-results-wrap">
+            <div class="hql-error-msg">&#9888; Request failed: ${escHtml(err.message)}</div>
+          </div>`;
+      }
+    });
+}
+
+/**
+ * Render query result data as an HTML table or raw JSON.
+ * @param {{ columns: string[], rows: object[], total: number, page: number, pages: number }} data
+ * @param {'table'|'raw'} mode
+ */
+function renderQueryResults(data, mode) {
+  const container = document.getElementById('hql-results-container');
+  if (!container) return;
+
+  const startRow = (data.page - 1) * hqlState.currentPageSize + 1;
+  const endRow = startRow + data.rows.length - 1;
+  const rangeInfo = data.total === 0
+    ? 'No results'
+    : `Showing ${startRow.toLocaleString()}–${endRow.toLocaleString()} of ${data.total.toLocaleString()} rows`;
+
+  let bodyHtml = '';
+
+  if (mode === 'raw') {
+    // Raw JSON view
+    const rawJson = JSON.stringify(data.rows, null, 2);
+    bodyHtml = `
+      <div style="overflow-y:auto; max-height:380px; background:#0a0a1a; padding:0.5rem 0.75rem;">
+        <pre style="margin:0; font-family:'Consolas','Monaco',monospace; font-size:0.78rem;
+          color:#a8ff78; white-space:pre-wrap; word-break:break-all;">${escHtml(rawJson)}</pre>
+      </div>`;
+  } else if (data.columns.length === 0 || data.total === 0) {
+    bodyHtml = `
+      <div class="browse-empty" style="padding:1.5rem">
+        <p>Query returned no rows.</p>
+      </div>`;
+  } else {
+    // Table view
+    const thead = data.columns.map(c =>
+      `<th title="${escHtml(c)}">${escHtml(c)}</th>`
+    ).join('');
+
+    const rows = data.rows.map(row => {
+      const cells = data.columns.map(col => {
+        const val = row[col];
+        const display = val === null || val === undefined ? '' : String(val);
+        return `<td title="${escHtml(display)}">${escHtml(display)}</td>`;
+      }).join('');
+      return `<tr>${cells}</tr>`;
+    }).join('');
+
+    bodyHtml = `
+      <div class="hql-results-table-wrap">
+        <table class="table table-sm hql-results-table mb-0">
+          <thead><tr>${thead}</tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+  }
+
+  // Pagination controls
+  const prevDisabled = data.page <= 1 ? 'disabled' : '';
+  const nextDisabled = data.page >= data.pages ? 'disabled' : '';
+  const paginationHtml = data.pages > 1 ? `
+    <div class="hql-pagination">
+      <button ${prevDisabled} onclick="loadQueryPage(${data.page - 1})">&laquo; Prev</button>
+      <span class="hql-page-info">Page ${data.page} of ${data.pages.toLocaleString()}</span>
+      <button ${nextDisabled} onclick="loadQueryPage(${data.page + 1})">Next &raquo;</button>
+    </div>` : '<div></div>';
+
+  container.innerHTML = `
+    <div class="hql-results-wrap">
+      <div class="hql-results-header">
+        <span class="hql-results-info">${rangeInfo}</span>
+        <span class="text-muted" style="font-size:0.7rem">${data.columns.length} column${data.columns.length !== 1 ? 's' : ''}</span>
+      </div>
+      ${bodyHtml}
+      <div class="hql-results-footer">
+        ${paginationHtml}
+        <span class="text-muted" style="font-size:0.7rem">
+          ${data.pages > 1 ? `${data.total.toLocaleString()} total rows` : ''}
+        </span>
+      </div>
+    </div>`;
 }
 </script>
 </body>
