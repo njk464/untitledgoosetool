@@ -71,3 +71,5 @@ wsproto==1.2.0
 yarl==1.17.0
 zipp==3.20.2
 zstandard==0.23.0
+pyhql==0.0.9
+ndjson==0.3.1
