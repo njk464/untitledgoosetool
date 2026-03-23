@@ -782,7 +782,7 @@ function loadBrowseTree() {
 
 /**
  * Render the full sourcetype tree into #browse-tree-container.
- * @param {{ types: Array }} data - Response from /api/browse/tree
+ * @param {Object} data - Response from /api/browse/tree
  */
 function renderBrowseTree(data) {
   const container = document.getElementById('browse-tree-container');
@@ -1123,7 +1123,7 @@ function loadFiles(typeId, subtypeId, subcategoryId, sourcetypeId) {
 
 /**
  * Render the file list table from an /api/browse/files response.
- * @param {{ sourcetype: string, display_name: string, files: Array }} data
+ * @param {Object} data - Response from /api/browse/files
  */
 function renderFileList(data) {
   const container = document.getElementById('browse-files-container');
