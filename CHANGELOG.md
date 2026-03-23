@@ -3,6 +3,12 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+### Fixed
+- HQL: Increase max_file_size_mb from 200 to 1024 (1 GB) for large forensic exports
+- HQL: Bump Schema sample_size from 100 to 10000 for reliable type inference on heterogeneous NDJSON
+- HQL: Fallback from to_dicts() to write_json() for Polars Struct columns (nested JSON fields)
+- Web UI: Fix Jinja2 template syntax error in JSDoc comment (index.html line 1580)
+
 ### Added
 - Entra ID: administrative units and cross-tenant access policy endpoints for forensic coverage
 - MDE: 8 new advanced hunting tables (DeviceInfo, DeviceNetworkInfo, Defender XDR tables)

@@ -86,6 +86,32 @@ try:
         return data
 
     _json_db_mod.JSON.load_data = _patched_load_data
+
+    # ------------------------------------------------------------------
+    # Monkey-patch: bump Schema sample_size to reduce type-inference mismatches
+    # ------------------------------------------------------------------
+    # pyhql's Table.__init__ calls Schema(init_data, sample_size=100), which
+    # only inspects 100 rows when inferring column types.  UAL and other
+    # heterogeneous NDJSON files often have fields that are null in the first
+    # 100 rows and populated later, causing schema mismatches at query time.
+    # We intercept Schema.__init__ and ensure sample_size is at least 10000.
+    #
+    # @decision DEC-HQL-004
+    # @title Bump Schema sample_size to 10000 via monkey-patch
+    # @status accepted
+    # @rationale pyhql hardcodes sample_size=100 in Table.__init__.  We cannot
+    #   override it via a public API, so we patch Schema.__init__ to clamp the
+    #   value upwards.  10000 rows is still fast for JSONL files up to ~1 GB
+    #   while dramatically reducing schema-mismatch errors on UAL exports.
+    _data_mod = importlib.import_module('Hql.Data')
+    _OrigSchema = _data_mod.Schema
+    _orig_schema_init = _OrigSchema.__init__
+
+    def _patched_schema_init(self, data=None, schema=None, sample_size=1):
+        """Schema __init__ wrapper that bumps sample_size to at least 10000."""
+        _orig_schema_init(self, data=data, schema=schema, sample_size=max(sample_size, 10000))
+
+    _OrigSchema.__init__ = _patched_schema_init
 except ImportError:
     pass  # pyhql or ndjson not installed; errors will surface at query time
 
@@ -132,7 +158,7 @@ def run_hql_query(
     file_path: str = None,
     page: int = 1,
     page_size: int = 100,
-    max_file_size_mb: int = 200,
+    max_file_size_mb: int = 1024,
 ) -> dict:
     """Execute an HQL query against collected Goosey data.
 
@@ -243,7 +269,14 @@ def run_hql_query(
     # Pagination via Polars .slice()
     offset = (page - 1) * page_size
     page_df = df.slice(offset, page_size)
-    rows = page_df.to_dicts()
+    try:
+        rows = page_df.to_dicts()
+    except TypeError:
+        # Polars to_dicts() fails on Struct columns (nested JSON objects such
+        # as UAL AuditData fields) with:
+        #   PythonTypes.dict.__init__() missing 1 required positional argument: 'keys'
+        # write_json() serialises all Polars types correctly, including Structs.
+        rows = json.loads(page_df.write_json())
 
     # JSON-serialise any non-serialisable values (e.g. Polars Null types)
     safe_rows = []
