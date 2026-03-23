@@ -1577,7 +1577,7 @@ function _executeHqlQuery(query, page) {
 
 /**
  * Render query result data as an HTML table or raw JSON.
- * @param {{ columns: string[], rows: object[], total: number, page: number, pages: number }} data
+ * @param {Object} data columns, rows, total, page, pages
  * @param {'table'|'raw'} mode
  */
 function renderQueryResults(data, mode) {
