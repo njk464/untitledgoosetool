@@ -241,6 +241,159 @@
   .hql-field-menu .fm-item:hover { background: #0f3460; color: #64ffda; }
   .hql-field-menu .fm-item .fm-op { color: #64ffda; font-weight: 600; margin-right: 4px; }
   .hql-field-menu .fm-item .fm-op.exclude { color: #ff6b6b; }
+
+  /* ============================================================
+     Hunting Queries Panel
+     @decision DEC-HUNT-FRONTEND-001
+     @title Lazy-loaded, client-side-filtered hunting query panel in Browse left panel
+     @status accepted
+     @rationale The catalog is fetched once on first expansion and cached in huntState.catalog.
+       Client-side filtering (debounced 300 ms) mirrors the existing browse-search pattern for
+       zero-network-cost subsequent keystrokes. Click-to-run calls /api/hunting/resolve to
+       locate real files before populating the HQL editor, keeping the catalog decoupled from
+       the file system.
+     ============================================================ */
+
+  /* Section wrapper — sits below the file tree in the left panel */
+  .hunt-section { margin-top: 1rem; border-top: 1px solid #0f3460; }
+
+  /* Collapsible header row */
+  .hunt-section-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 0.4rem 0.5rem; cursor: pointer; user-select: none;
+    background: #12192e;
+  }
+  .hunt-section-header:hover { background: #16213e; }
+  .hunt-section-title {
+    color: #64ffda; font-size: 0.78rem; font-weight: 600;
+    letter-spacing: 0.5px; text-transform: uppercase;
+  }
+  .hunt-section-chevron { font-size: 0.65rem; color: #4a5568; transition: transform 0.2s; }
+  .hunt-section-chevron.open { transform: rotate(90deg); }
+
+  /* Collapsible body */
+  .hunt-section-body { overflow: hidden; max-height: 0; transition: max-height 0.3s ease; }
+  .hunt-section-body.open { max-height: 9999px; }
+
+  /* Search box inside hunting panel */
+  .hunt-search-wrap { position: relative; padding: 0.5rem 0.5rem 0.35rem; }
+  .hunt-search {
+    width: 100%; background: #0d0d1a; border: 1px solid #0f3460; color: #e0e0e0;
+    border-radius: 4px; padding: 4px 28px 4px 8px; font-size: 0.8rem; outline: none;
+  }
+  .hunt-search:focus { border-color: #64ffda; }
+  .hunt-search::placeholder { color: #4a5568; }
+  .hunt-search-clear {
+    position: absolute; right: 14px; top: 50%; transform: translateY(-50%);
+    background: none; border: none; color: #8892b0; cursor: pointer;
+    font-size: 0.9rem; padding: 0; display: none; line-height: 1;
+  }
+  .hunt-search-clear.visible { display: block; }
+
+  /* Category group header */
+  .hunt-cat-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 0.3rem 0.5rem; font-size: 0.75rem; color: #8892b0;
+    text-transform: uppercase; letter-spacing: 0.4px;
+    border-bottom: 1px solid #0f3460; cursor: pointer;
+  }
+  .hunt-cat-header:hover { background: #16213e; color: #ccd6f6; }
+  .hunt-cat-chevron { font-size: 0.6rem; color: #4a5568; transition: transform 0.2s; }
+  .hunt-cat-chevron.open { transform: rotate(90deg); }
+  .hunt-cat-body { background: #0a0f1e; overflow: hidden; }
+  .hunt-cat-body.collapsed { display: none; }
+
+  /* Individual query row */
+  .hunt-query-row {
+    padding: 0.3rem 0.75rem; cursor: pointer; border-bottom: 1px dotted #0a0f1e;
+    transition: background 0.1s;
+  }
+  .hunt-query-row:hover { background: #16213e; }
+  .hunt-query-row.hunt-hidden { display: none !important; }
+  .hunt-query-main { display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap; }
+  .hunt-query-name { color: #ccd6f6; font-size: 0.8rem; flex: 1 1 auto; min-width: 0; }
+  .hunt-query-name:hover { color: #64ffda; text-decoration: underline; }
+
+  /* Severity pill badges */
+  .severity-badge {
+    display: inline-block; font-size: 0.65rem; font-weight: 700; padding: 1px 6px;
+    border-radius: 8px; text-transform: uppercase; letter-spacing: 0.4px; white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .severity-critical { background: #dc3545; color: #fff; }
+  .severity-high     { background: #fd7e14; color: #1a1a2e; }
+  .severity-medium   { background: #ffc107; color: #1a1a2e; }
+  .severity-low      { background: #0d6efd; color: #fff; }
+  .severity-info     { background: #6c757d; color: #fff; }
+
+  /* MITRE chips */
+  .hunt-chips { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 2px; }
+  .mitre-chip {
+    display: inline-block; font-size: 0.6rem; padding: 1px 5px;
+    background: #1a2a3e; color: #8892b0; border: 1px solid #0f3460;
+    border-radius: 4px; white-space: nowrap;
+  }
+
+  /* Info toggle + detail panel */
+  .hunt-info-btn {
+    background: none; border: none; color: #4a5568; cursor: pointer;
+    font-size: 0.75rem; padding: 0 2px; line-height: 1; flex-shrink: 0;
+  }
+  .hunt-info-btn:hover { color: #64ffda; }
+  .hunt-detail {
+    display: none; background: #0a0a1a; border: 1px solid #0f3460;
+    border-radius: 4px; margin: 0.3rem 0 0.1rem; padding: 0.4rem 0.6rem;
+    font-size: 0.75rem;
+  }
+  .hunt-detail.visible { display: block; }
+  .hunt-detail-desc { color: #8892b0; margin-bottom: 0.35rem; }
+  .hunt-detail-kql { font-family: 'Consolas','Monaco',monospace; color: #a8ff78;
+    font-size: 0.7rem; white-space: pre-wrap; word-break: break-all; }
+  .hunt-detail-label { color: #4a5568; font-size: 0.68rem; text-transform: uppercase;
+    letter-spacing: 0.4px; margin-bottom: 2px; }
+
+  /* Empty / loading states inside hunt panel */
+  .hunt-empty { text-align: center; padding: 1rem 0.5rem; color: #4a5568; font-size: 0.8rem; }
+
+  /* Toast notification */
+  .hunt-toast {
+    position: fixed; bottom: 1.5rem; left: 50%; transform: translateX(-50%);
+    background: #12192e; border: 1px solid #0f3460; border-radius: 6px;
+    padding: 0.5rem 1.2rem; font-size: 0.82rem; color: #ccd6f6;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.5); z-index: 9999;
+    opacity: 0; transition: opacity 0.25s;
+    pointer-events: none;
+  }
+  .hunt-toast.visible { opacity: 1; pointer-events: auto; }
+  .hunt-toast.error { border-color: #ff6b6b; color: #ff6b6b; }
+
+  /* File-picker modal overlay */
+  .hunt-modal-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+    z-index: 9000; align-items: center; justify-content: center;
+  }
+  .hunt-modal-overlay.visible { display: flex; }
+  .hunt-modal {
+    background: #12192e; border: 1px solid #0f3460; border-radius: 8px;
+    padding: 1.25rem 1.5rem; min-width: 340px; max-width: 560px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+  }
+  .hunt-modal-title { color: #64ffda; font-size: 0.9rem; font-weight: 600; margin-bottom: 0.75rem; }
+  .hunt-modal-subtitle { color: #8892b0; font-size: 0.78rem; margin-bottom: 0.75rem; }
+  .hunt-modal-file-list { max-height: 220px; overflow-y: auto; margin-bottom: 0.75rem; }
+  .hunt-modal-file-item {
+    display: flex; align-items: center; gap: 0.5rem; padding: 0.3rem 0.4rem;
+    cursor: pointer; border-radius: 4px; font-size: 0.8rem; color: #ccd6f6;
+    font-family: 'Consolas','Monaco',monospace; border-bottom: 1px solid #0f3460;
+  }
+  .hunt-modal-file-item:hover { background: #16213e; color: #64ffda; }
+  .hunt-modal-file-item .fmod { color: #6c757d; font-size: 0.7rem; margin-left: auto; }
+  .hunt-modal-footer { display: flex; justify-content: flex-end; gap: 0.5rem; }
+  .hunt-modal-cancel {
+    background: transparent; border: 1px solid #0f3460; color: #8892b0;
+    border-radius: 4px; padding: 3px 14px; font-size: 0.8rem; cursor: pointer;
+  }
+  .hunt-modal-cancel:hover { border-color: #64ffda; color: #64ffda; }
 </style>
 </head>
 <body>
@@ -457,6 +610,41 @@
               <p class="mt-2 small">Loading tree...</p>
             </div>
           </div>
+
+          <!-- Hunting Queries Panel -->
+          <div class="hunt-section" id="hunt-section">
+            <div class="hunt-section-header" id="hunt-section-header" onclick="toggleHuntSection()">
+              <span class="hunt-section-title" id="hunt-section-title">Hunting Queries</span>
+              <span class="hunt-section-chevron" id="hunt-section-chevron">&#9658;</span>
+            </div>
+            <div class="hunt-section-body" id="hunt-section-body">
+              <div class="hunt-search-wrap">
+                <input type="text" class="hunt-search" id="hunt-search"
+                  placeholder="Search queries, MITRE IDs..."
+                  oninput="huntDebouncedSearch(this.value)">
+                <button class="hunt-search-clear" id="hunt-search-clear"
+                  title="Clear search" onclick="huntClearSearch()">&#x2715;</button>
+              </div>
+              <div id="hunt-catalog-container">
+                <div class="hunt-empty">Expand to load queries</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- File-picker modal for multi-file hunting queries -->
+          <div class="hunt-modal-overlay" id="hunt-modal-overlay" onclick="huntModalOverlayClick(event)">
+            <div class="hunt-modal">
+              <div class="hunt-modal-title" id="hunt-modal-title">Select File to Query</div>
+              <div class="hunt-modal-subtitle" id="hunt-modal-subtitle"></div>
+              <div class="hunt-modal-file-list" id="hunt-modal-file-list"></div>
+              <div class="hunt-modal-footer">
+                <button class="hunt-modal-cancel" onclick="closeHuntModal()">Cancel</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Toast notification -->
+          <div class="hunt-toast" id="hunt-toast"></div>
         </div>
 
         <!-- RIGHT PANEL: breadcrumb + files + query editor + results -->
@@ -1965,6 +2153,422 @@ function applyFieldFilter(col, val, op) {
     hqlState.currentPage = 1;
     runBrowseQuery();
   }
+}
+
+// ============================================================
+// HUNTING QUERIES PANEL
+//
+// @decision DEC-HUNT-FRONTEND-001
+// @title Lazy-loaded, client-side-filtered hunting query panel
+// @status accepted
+// @rationale The catalog is fetched once on first expansion and cached in
+//   huntState.catalog. Client-side filtering (debounced 300 ms) mirrors the
+//   existing browse-search pattern for zero-network-cost subsequent keystrokes.
+//   Click-to-run calls /api/hunting/resolve to locate real files before
+//   populating the HQL editor, keeping the catalog decoupled from the file
+//   system. The modal for multi-file selection is a lightweight vanilla JS
+//   overlay rather than a Bootstrap modal to avoid adding JS dependencies.
+// ============================================================
+
+/** Shared mutable state for the Hunting Queries panel. */
+const huntState = {
+  catalog: null,      // Cached /api/hunting/queries response (full query list)
+  loaded: false,
+  loading: false,
+  open: false,        // Whether the panel body is currently expanded
+  pendingQuery: null, // Query dict waiting for file selection in the modal
+};
+
+/** Human-readable labels for category+subcategory pairs. */
+const HUNT_CAT_LABELS = {
+  'entra_id:sign_in': 'Entra ID \u2014 Sign-in',
+  'entra_id:config':  'Entra ID \u2014 Config',
+  'entra_id:risk':    'Entra ID \u2014 Risk',
+  'm365:ual':         'M365 \u2014 UAL',
+  'm365:mailbox':     'M365 \u2014 Mailbox',
+  'mde:alerts':       'MDE \u2014 Alerts',
+  'mde:advanced':     'MDE \u2014 Advanced Hunting',
+  'azure:activity':   'Azure \u2014 Activity',
+  'azure:resources':  'Azure \u2014 Resources',
+};
+
+/** Map severity string to CSS modifier class. */
+const SEVERITY_CLASS = {
+  critical: 'severity-critical',
+  high:     'severity-high',
+  medium:   'severity-medium',
+  low:      'severity-low',
+  info:     'severity-info',
+};
+
+const huntDebouncedSearch = debounce(filterHuntQueries, 300);
+
+// ---- Section toggle ----
+
+/**
+ * Toggle the hunting queries panel open/closed.
+ * Fetches the catalog on first open.
+ */
+function toggleHuntSection() {
+  const body   = document.getElementById('hunt-section-body');
+  const chevron = document.getElementById('hunt-section-chevron');
+  huntState.open = !huntState.open;
+
+  if (huntState.open) {
+    body.classList.add('open');
+    chevron.classList.add('open');
+    if (!huntState.loaded && !huntState.loading) {
+      loadHuntCatalog();
+    }
+  } else {
+    body.classList.remove('open');
+    chevron.classList.remove('open');
+  }
+}
+
+// ---- Catalog loading ----
+
+/**
+ * Fetch the hunting query catalog from /api/hunting/queries.
+ * Caches in huntState.catalog; subsequent calls are no-ops.
+ */
+function loadHuntCatalog() {
+  if (huntState.loaded || huntState.loading) return;
+  huntState.loading = true;
+
+  const container = document.getElementById('hunt-catalog-container');
+  container.innerHTML = '<div class="hunt-empty"><div class="spinner-border spinner-border-sm text-secondary" role="status"></div></div>';
+
+  fetch('/api/hunting/queries')
+    .then(r => r.json())
+    .then(data => {
+      huntState.catalog  = data.queries || [];
+      huntState.loaded   = true;
+      huntState.loading  = false;
+
+      // Update header title with count
+      const title = document.getElementById('hunt-section-title');
+      if (title) title.textContent = 'Hunting Queries (' + huntState.catalog.length + ')';
+
+      renderHuntCatalog(huntState.catalog);
+    })
+    .catch(err => {
+      huntState.loading = false;
+      container.innerHTML = '<div class="hunt-empty" style="color:#ff6b6b">Failed to load queries: ' + escHtml(err.message) + '</div>';
+    });
+}
+
+// ---- Rendering ----
+
+/**
+ * Render the full hunting catalog grouped by category/subcategory.
+ * @param {Array} queries - Array of query objects from the catalog.
+ */
+function renderHuntCatalog(queries) {
+  const container = document.getElementById('hunt-catalog-container');
+
+  if (!queries || queries.length === 0) {
+    container.innerHTML = '<div class="hunt-empty">No hunting queries available.</div>';
+    return;
+  }
+
+  // Group by category:subcategory key
+  const groups = {};
+  queries.forEach(q => {
+    const key = (q.category || 'other') + ':' + (q.subcategory || '');
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(q);
+  });
+
+  const frag = document.createDocumentFragment();
+
+  Object.entries(groups).forEach(([key, qs]) => {
+    const label = HUNT_CAT_LABELS[key] || key.replace(':', ' \u2014 ');
+
+    const catWrap = document.createElement('div');
+    catWrap.className = 'hunt-cat-wrap';
+    catWrap.dataset.catKey = key;
+
+    const catHeader = document.createElement('div');
+    catHeader.className = 'hunt-cat-header';
+    catHeader.innerHTML =
+      '<span><span class="hunt-cat-chevron open">&#9658;</span> ' + escHtml(label) + '</span>' +
+      '<span class="browse-badge">' + qs.length + '</span>';
+    catHeader.addEventListener('click', () => {
+      const body = catWrap.querySelector('.hunt-cat-body');
+      const chev = catHeader.querySelector('.hunt-cat-chevron');
+      if (body) {
+        body.classList.toggle('collapsed');
+        chev.classList.toggle('open', !body.classList.contains('collapsed'));
+      }
+    });
+
+    const catBody = document.createElement('div');
+    catBody.className = 'hunt-cat-body';
+
+    qs.forEach(q => {
+      catBody.appendChild(buildHuntQueryRow(q));
+    });
+
+    catWrap.appendChild(catHeader);
+    catWrap.appendChild(catBody);
+    frag.appendChild(catWrap);
+  });
+
+  container.innerHTML = '';
+  container.appendChild(frag);
+}
+
+/**
+ * Build a single hunt query row DOM element.
+ * @param {Object} q - Query object from catalog.
+ * @returns {HTMLElement}
+ */
+function buildHuntQueryRow(q) {
+  const row = document.createElement('div');
+  row.className = 'hunt-query-row';
+  row.dataset.queryId   = q.id;
+  row.dataset.queryName = (q.name || '').toLowerCase();
+  row.dataset.queryDesc = (q.description || '').toLowerCase();
+  row.dataset.queryMitre = (q.mitre_ids || []).join(' ').toLowerCase();
+
+  const sevClass = SEVERITY_CLASS[q.severity] || 'severity-info';
+
+  // Main row: name + severity + info btn
+  const mainDiv = document.createElement('div');
+  mainDiv.className = 'hunt-query-main';
+  mainDiv.innerHTML =
+    '<span class="hunt-query-name">' + escHtml(q.name) + '</span>' +
+    '<span class="severity-badge ' + sevClass + '">' + escHtml(q.severity || 'info') + '</span>' +
+    '<button class="hunt-info-btn" title="Show details">\u24d8</button>';
+
+  // MITRE chips
+  const chipsDiv = document.createElement('div');
+  chipsDiv.className = 'hunt-chips';
+  (q.mitre_ids || []).forEach(mid => {
+    const chip = document.createElement('span');
+    chip.className = 'mitre-chip';
+    chip.textContent = mid;
+    chipsDiv.appendChild(chip);
+  });
+
+  // Detail panel (hidden by default)
+  const detail = document.createElement('div');
+  detail.className = 'hunt-detail';
+  const kqlSection = q.source_kql
+    ? '<div class="hunt-detail-label" style="margin-top:0.4rem">Source KQL</div><div class="hunt-detail-kql">' + escHtml(q.source_kql) + '</div>'
+    : '';
+  const patternsSection = (q.target_files && q.target_files.length > 0)
+    ? '<div class="hunt-detail-label" style="margin-top:0.4rem">Target files</div><div style="font-family:Consolas,Monaco,monospace;font-size:0.7rem;color:#8892b0">' + q.target_files.map(p => escHtml(p)).join('<br>') + '</div>'
+    : '';
+  detail.innerHTML =
+    '<div class="hunt-detail-desc">' + escHtml(q.description) + '</div>' +
+    kqlSection + patternsSection;
+
+  // Info button toggles detail
+  const infoBtn = mainDiv.querySelector('.hunt-info-btn');
+  infoBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    detail.classList.toggle('visible');
+  });
+
+  // Clicking query name triggers run
+  const nameEl = mainDiv.querySelector('.hunt-query-name');
+  nameEl.addEventListener('click', e => {
+    e.stopPropagation();
+    runHuntQuery(q);
+  });
+
+  row.appendChild(mainDiv);
+  if (q.mitre_ids && q.mitre_ids.length > 0) row.appendChild(chipsDiv);
+  row.appendChild(detail);
+  return row;
+}
+
+// ---- Search / filter ----
+
+/**
+ * Filter displayed query rows client-side based on search text.
+ * Matches against name, description, and MITRE IDs.
+ * Hides empty category groups.
+ * @param {string} query
+ */
+function filterHuntQueries(query) {
+  const clearBtn = document.getElementById('hunt-search-clear');
+  clearBtn.classList.toggle('visible', query.length > 0);
+
+  const q = query.trim().toLowerCase();
+  const container = document.getElementById('hunt-catalog-container');
+
+  container.querySelectorAll('.hunt-query-row').forEach(row => {
+    if (!q) {
+      row.classList.remove('hunt-hidden');
+      return;
+    }
+    const name  = row.dataset.queryName  || '';
+    const desc  = row.dataset.queryDesc  || '';
+    const mitre = row.dataset.queryMitre || '';
+    row.classList.toggle('hunt-hidden', !name.includes(q) && !desc.includes(q) && !mitre.includes(q));
+  });
+
+  if (!q) {
+    container.querySelectorAll('.hunt-cat-wrap').forEach(w => w.classList.remove('hunt-hidden'));
+    return;
+  }
+
+  // Hide category groups with no visible rows
+  container.querySelectorAll('.hunt-cat-wrap').forEach(wrap => {
+    const anyVisible = Array.from(wrap.querySelectorAll('.hunt-query-row'))
+      .some(r => !r.classList.contains('hunt-hidden'));
+    wrap.classList.toggle('hunt-hidden', !anyVisible);
+  });
+}
+
+/** Clear the hunt search input and reset visibility. */
+function huntClearSearch() {
+  const input = document.getElementById('hunt-search');
+  if (input) input.value = '';
+  filterHuntQueries('');
+}
+
+// ---- Click-to-run ----
+
+/**
+ * Handle a click on a hunting query name:
+ * 1. Call /api/hunting/resolve to find matching files.
+ * 2. If 1 file: auto-populate HQL editor and execute.
+ * 3. If multiple files: open file picker modal.
+ * 4. If 0 files: show toast.
+ * @param {Object} q - Query object from catalog.
+ */
+function runHuntQuery(q) {
+  fetch('/api/hunting/resolve?id=' + encodeURIComponent(q.id))
+    .then(r => r.json())
+    .then(data => {
+      if (data.error) {
+        showHuntToast(data.error, true);
+        return;
+      }
+      const files = data.files || [];
+      if (files.length === 0) {
+        showHuntToast('No matching data collected for this query.', false);
+        return;
+      }
+      if (files.length === 1) {
+        executeHuntWithFile(q, files[0].path);
+      } else {
+        openHuntModal(q, files);
+      }
+    })
+    .catch(err => {
+      showHuntToast('Error resolving files: ' + err.message, true);
+    });
+}
+
+/**
+ * Populate the HQL editor with a hunting query against a specific file and run it.
+ * @param {Object} q     - Query object from catalog.
+ * @param {string} path  - Relative file path within the output directory.
+ */
+function executeHuntWithFile(q, path) {
+  // Switch to the right panel (show HQL editor if hidden)
+  const editorWrap = document.getElementById('hql-editor-wrap');
+  if (editorWrap) editorWrap.style.display = '';
+
+  // Clear raw preview
+  const previewContainer = document.getElementById('browse-preview-container');
+  if (previewContainer) previewContainer.innerHTML = '';
+
+  // Build the full HQL expression:
+  //   database("goose").file("<path>") | <hql_query>
+  const normPath = path.replace(/\\/g, '/');
+  const fullQuery = 'database("goose").file("' + normPath + '") | ' + q.hql_query;
+
+  const textarea = document.getElementById('hql-query-textarea');
+  if (textarea) textarea.value = fullQuery;
+
+  hqlState.currentFile = normPath;
+  hqlState.currentPage = 1;
+
+  // Scroll right panel into view (left panel may be tall)
+  if (editorWrap) editorWrap.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+  runBrowseQuery();
+}
+
+// ---- File picker modal ----
+
+/**
+ * Open the file-picker modal when a query resolves to multiple files.
+ * @param {Object}   q     - Query object.
+ * @param {Array}    files - Array of {path, size, modified} objects.
+ */
+function openHuntModal(q, files) {
+  huntState.pendingQuery = q;
+
+  const overlay   = document.getElementById('hunt-modal-overlay');
+  const title     = document.getElementById('hunt-modal-title');
+  const subtitle  = document.getElementById('hunt-modal-subtitle');
+  const fileList  = document.getElementById('hunt-modal-file-list');
+
+  if (title)    title.textContent    = escHtml(q.name);
+  if (subtitle) subtitle.textContent = files.length + ' matching files found \u2014 select one to query:';
+
+  if (fileList) {
+    fileList.innerHTML = '';
+    files.forEach(f => {
+      const item = document.createElement('div');
+      item.className = 'hunt-modal-file-item';
+      const fname = f.path.split('/').pop();
+      const mod   = f.modified ? f.modified.replace('T', ' ') : '';
+      item.innerHTML =
+        '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + escHtml(f.path) + '">' + escHtml(fname) + '</span>' +
+        '<span class="fmod">' + escHtml(mod) + '</span>';
+      item.addEventListener('click', () => {
+        closeHuntModal();
+        executeHuntWithFile(q, f.path);
+      });
+      fileList.appendChild(item);
+    });
+  }
+
+  if (overlay) overlay.classList.add('visible');
+}
+
+/** Close the file-picker modal. */
+function closeHuntModal() {
+  const overlay = document.getElementById('hunt-modal-overlay');
+  if (overlay) overlay.classList.remove('visible');
+  huntState.pendingQuery = null;
+}
+
+/** Dismiss modal on overlay (background) click but not on modal content click. */
+function huntModalOverlayClick(event) {
+  if (event.target === document.getElementById('hunt-modal-overlay')) {
+    closeHuntModal();
+  }
+}
+
+// ---- Toast notification ----
+
+let _huntToastTimer = null;
+
+/**
+ * Show a brief toast notification in the bottom center of the screen.
+ * @param {string}  msg   - Message to display.
+ * @param {boolean} error - If true, apply error styling.
+ */
+function showHuntToast(msg, error) {
+  const toast = document.getElementById('hunt-toast');
+  if (!toast) return;
+  toast.textContent = msg;
+  toast.classList.toggle('error', !!error);
+  toast.classList.add('visible');
+  if (_huntToastTimer) clearTimeout(_huntToastTimer);
+  _huntToastTimer = setTimeout(() => {
+    toast.classList.remove('visible');
+    toast.classList.remove('error');
+  }, 3500);
 }
 </script>
 </body>
