@@ -114,6 +114,33 @@ try:
     _Table = _data_mod.Table
     _orig_table_init = _Table.__init__
 
+    def _safe_schema_from_df(df):
+        """Build an HQL Schema from a Polars DataFrame, handling unsupported types.
+
+        pyhql's Schema.from_df fails on complex types like List(Struct).
+        This wrapper converts columns individually, falling back to a
+        multivalue(string) or string type for anything pyhql can't handle.
+        """
+        from Hql.Types.Polars import PolarsTypes as plt
+        from Hql.Types.Hql import HqlTypes as hqlt
+        schema_dict = {}
+        for col in df.columns:
+            dtype = df[col].dtype
+            try:
+                if isinstance(dtype, pl.Struct):
+                    # Let pyhql handle structs as nested schemas
+                    schema_dict[col] = _data_mod.Schema.from_df(
+                        pl.DataFrame(df[col]).unnest(col))
+                else:
+                    schema_dict[col] = plt.from_pure_polars(dtype)
+            except Exception:
+                # Fallback: List types → multivalue(string), else string
+                if isinstance(dtype, pl.List):
+                    schema_dict[col] = hqlt.multivalue(hqlt.string())
+                else:
+                    schema_dict[col] = hqlt.string()
+        return _data_mod.Schema(schema=schema_dict)
+
     def _flatten_for_polars(rows):
         """Convert nested dicts/lists to JSON strings so Polars can ingest."""
         flat = []
@@ -130,7 +157,7 @@ try:
     def _init_table_fields(self, kwargs, df):
         """Set required Table fields after manual DataFrame construction."""
         self.df = df
-        self.schema = _data_mod.Schema(data=self.df)
+        self.schema = _safe_schema_from_df(df)
         self.name = kwargs.get('name', '')
         self.series = None
         self.agg = None
