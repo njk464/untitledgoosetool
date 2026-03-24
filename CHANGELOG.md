@@ -10,6 +10,7 @@ All notable changes to this project will be documented in this file.
 - Web UI: Fix Jinja2 template syntax error in JSDoc comment (index.html line 1580)
 
 ### Added
+- Web UI: Hunting Queries panel in Browse Data left sidebar — collapsible section with 40-query catalog, client-side filtering, and click-to-run integration with HQL editor
 - Web API: Hunting query catalog endpoints (`/api/hunting/queries`, per-category, per-query) with file resolution and path-security validation
 - Hunting: 40 curated HQL hunting queries across 5 categories (sign-in, UAL, config, MDE, Azure) with validation script and KQL-to-HQL translation guide
 - Entra ID: administrative units and cross-tenant access policy endpoints for forensic coverage
