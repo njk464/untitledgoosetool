@@ -6,7 +6,7 @@
 **Languages:** Python (85%), Rust (15% -- new analyzer binary)
 **Root:** `/home/analyst/untitledgoosetool`
 **Created:** 2026-03-16
-**Last updated:** 2026-03-16
+**Last updated:** 2026-03-24
 
 Untitled Goose Tool (Goosey) is a CISA-published hunt and incident response tool for collecting telemetry from Microsoft cloud environments (Entra ID, Azure, M365, MDE, D4IoT). The Python collector exports JSONL data; the Rust analyzer (`goosey-analyzer`) scans that output for indicators of compromise using data-driven detection rules.
 
@@ -66,6 +66,10 @@ Untitled Goose Tool (Goosey) is a CISA-published hunt and incident response tool
 | 2026-03-22 | DEC-BROWSE-003 | browse-data | Three API endpoints (tree/files/preview) | Separation of concerns, lazy loading, fast initial render |
 | 2026-03-22 | DEC-BROWSE-004 | browse-data | Client-side search filtering | 876 sourcetypes is small enough for client-side substring match |
 | 2026-03-22 | DEC-BROWSE-005 | browse-data | Bootstrap accordion + nested lists for tree | Consistent with existing UI, no external dependencies |
+| 2026-03-24 | DEC-HUNT-001 | hunting-queries | Curated catalog over mechanical KQL transpiler | HQL lacks let/ago/union/make_set/parse_json/has_any; manual curation ensures every query works |
+| 2026-03-24 | DEC-HUNT-002 | hunting-queries | Static JSON catalog file (goosey/data/hunting_queries.json) | Consistent with sourcetypes.json pattern; JSON handles multi-line strings and nested arrays better than TOML |
+| 2026-03-24 | DEC-HUNT-003 | hunting-queries | Embed in Browse Data tab, not a new top-level tab | Queries operate on collected data already navigated in Browse; reuses existing HQL editor |
+| 2026-03-24 | DEC-HUNT-004 | hunting-queries | Query-to-file resolution via target_files glob matching | Reuses browse tree infrastructure; handles single/multi/no file cases gracefully |
 
 ---
 
@@ -534,6 +538,207 @@ Main is sacred. Sequential waves, single worktree per wave:
 - Entra ID output paths: `output/entraid/` with `signin_*/`, `entraid_configs/`, `ual_*`
 - M365 output paths: `output/m365/` with `EXO_*`, `ual_*`
 - MDE output paths: `output/mde/` with `api_*`
+
+### Initiative: hunting-queries
+**Status:** active
+**Started:** 2026-03-24
+**Goal:** Deliver a curated catalog of pre-built hunting queries that analysts can browse, search, and run from the web UI against collected Goosey data.
+
+> Goosey collects Microsoft cloud telemetry and has an HQL query tab, but analysts must write queries from scratch. The community maintains 455+ KQL hunting queries (Bert-JanP/Hunting-Queries-Detection-Rules), but KQL is not directly usable in HQL. A curated catalog of HQL-translated queries organized by platform and MITRE technique lets analysts run proven detections with one click, dramatically reducing time-to-first-finding during incident response. DEC-HUNT-001 (prior session) chose curated catalog over mechanical KQL transpiler since HQL supports only where, project, summarize, sort by, take, mv-expand.
+
+**Dominant Constraint:** simplicity
+
+#### Goals
+- REQ-GOAL-201: Enable analysts to run proven hunting queries against collected data without writing HQL from scratch
+- REQ-GOAL-202: Organize queries by platform (Entra ID, M365, Azure, MDE) and MITRE ATT&CK technique for rapid navigation
+- REQ-GOAL-203: Ship 30+ curated queries covering the most common IR scenarios on day one
+
+#### Non-Goals
+- REQ-NOGO-201: Automated KQL-to-HQL transpiler — HQL lacks let, ago(), union, make_set, parse_json, has_any; manual curation is required
+- REQ-NOGO-202: Full coverage of all 455+ community queries — start with queries that map to data Goosey actually collects and that HQL can express
+- REQ-NOGO-203: Custom query authoring/saving by users — future initiative; this ships a read-only catalog
+- REQ-NOGO-204: Integration with goosey-analyzer findings — separate concern; queries operate on raw collected data
+
+#### Requirements
+
+**Must-Have (P0)**
+
+- REQ-P0-201: Static `hunting_queries.json` catalog file shipped under `goosey/data/` with schema: id, name, description, category (platform), subcategory, hql_query, source_kql (original for reference), source_url, mitre_ids (list), target_files (list of sourcetype globs indicating which collected data files the query targets), severity
+  Acceptance: Given the catalog is loaded, When validated, Then every entry has non-empty name, hql_query, category, and target_files; every hql_query parses without error in pyhql
+- REQ-P0-202: Flask API endpoint `GET /api/hunting/queries` returning the catalog filtered by optional query params: category, mitre_id, search (substring match on name/description)
+  Acceptance: Given 30+ queries in the catalog, When `?category=entra_id` is requested, Then only Entra ID queries are returned
+- REQ-P0-203: "Hunting Queries" panel in the Browse Data tab — collapsible sidebar or section showing queries grouped by category, with MITRE tags and severity badges
+  Acceptance: Given the catalog is loaded, When the Hunting Queries panel is visible, Then queries are grouped by platform category and each shows name, severity badge, and MITRE IDs
+- REQ-P0-204: Click-to-run: selecting a hunting query populates the HQL query textarea and auto-selects the appropriate target file(s), then runs the query
+  Acceptance: Given a query targeting sign-in logs is selected, When clicked, Then the HQL textarea is filled with the query text, the correct file is selected from collected data, and the query executes automatically
+- REQ-P0-205: Initial catalog of 30+ curated queries covering: sign-in anomalies (failed logins, impossible travel, legacy auth, risky sign-ins), UAL detections (inbox rules, forwarding, OAuth consent, eDiscovery), Entra ID configs (dangerous app permissions, stale service principals), MDE alerts (high-severity alerts, lateral movement indicators)
+  Acceptance: Given the catalog, When queries are counted per category, Then at least 8 sign-in, 8 UAL, 6 Entra config, and 5 MDE queries exist
+
+**Nice-to-Have (P1)**
+
+- REQ-P1-201: Search/filter input in the hunting queries panel — client-side substring match on name, description, and MITRE ID
+- REQ-P1-202: "Applicable" badge on queries where Goosey has collected matching data (cross-reference target_files against browse tree)
+- REQ-P1-203: Query detail expansion showing description, source KQL (for reference), and MITRE technique names
+
+**Future Consideration (P2)**
+
+- REQ-P2-201: User-contributed queries — save custom queries to a local catalog file
+- REQ-P2-202: Auto-update catalog from upstream community repo
+- REQ-P2-203: Query parameterization — template variables (e.g., `{username}`, `{timerange}`) that analysts fill in before running
+
+#### Definition of Done
+
+The Hunting Queries panel appears in the Browse Data tab, displays 30+ curated queries organized by platform, allows search/filter, and click-to-run loads the query into HQL and executes it against the correct collected data file. The `hunting_queries.json` catalog validates and all queries parse in pyhql. REQ-P0-201 through REQ-P0-205 acceptance criteria are met.
+
+#### Architectural Decisions
+
+- DEC-HUNT-001: Curated catalog over mechanical KQL transpiler
+  Addresses: REQ-GOAL-201, REQ-NOGO-201.
+  Rationale: HQL supports only where, project, summarize, sort by, take, mv-expand. KQL features like let, ago(), union, make_set, parse_json, has_any have no HQL equivalent. A curated catalog ensures every shipped query actually works. Manual translation catches semantic differences (field names in Goosey output vs. KQL table schemas). Decision made in prior session.
+
+- DEC-HUNT-002: Static JSON catalog file (`goosey/data/hunting_queries.json`)
+  Addresses: REQ-P0-201.
+  Rationale: Consistent with existing `sourcetypes.json` pattern. Ships with the package, no database or external dependency. JSON over TOML because queries contain multi-line strings and nested arrays (mitre_ids, target_files) that are awkward in TOML. JSON over Python dicts because the catalog should be editable by non-developers and parseable by external tools.
+
+- DEC-HUNT-003: Embed hunting queries panel in existing Browse Data tab (not a new top-level tab)
+  Addresses: REQ-P0-203, REQ-P0-204.
+  Rationale: Hunting queries operate on collected data files, which are already navigated in the Browse Data tab. The HQL editor is already in Browse Data. A separate tab would require duplicating file selection and HQL execution. The hunting panel becomes a left-sidebar section below the browse tree, or a toggleable overlay, reusing the existing HQL editor and results display.
+
+- DEC-HUNT-004: Query-to-file resolution via target_files glob matching against browse tree
+  Addresses: REQ-P0-204.
+  Rationale: Each hunting query specifies target_files globs (e.g., `signin_*/signin_log_*.json`). When clicked, the UI matches these globs against collected files from the browse tree API. If exactly one file matches, it auto-selects. If multiple match, it presents a picker. If none match, it shows "No matching data collected." This reuses the existing browse infrastructure.
+
+#### Waves
+
+##### Initiative Summary
+- **Total items:** 4
+- **Critical path:** 3 waves (W1-1 -> W2-1 -> W3-1)
+- **Max width:** 2 (Wave 2)
+- **Gates:** 1 review (W1-1), 1 approve (W3-1)
+
+##### Wave 1 (no dependencies)
+**Parallel dispatches:** 1
+
+**W1-1: Hunting query catalog — data model and initial 30+ queries** — Weight: L, Gate: review
+- Create `goosey/data/hunting_queries.json` with the following schema:
+  ```json
+  {
+    "version": "1.0",
+    "queries": [
+      {
+        "id": "hunt-signin-001",
+        "name": "Failed Sign-ins by Country",
+        "description": "Identifies countries with high volumes of failed sign-in attempts, indicating potential password spray or brute force campaigns",
+        "category": "entra_id",
+        "subcategory": "sign_in",
+        "severity": "medium",
+        "mitre_ids": ["T1110.003"],
+        "hql_query": "where errorCode != \"0\" | summarize count() by ['location.countryOrRegion'] | sort by count_ desc | take 20",
+        "source_kql": "SigninLogs | where ResultType != 0 | summarize Count=count() by Location | sort by Count desc | take 20",
+        "source_url": "https://github.com/Bert-JanP/Hunting-Queries-Detection-Rules/blob/main/...",
+        "target_files": ["signin_*/signin_log_*.json", "signin_rt/rt_signin_log_*.json"]
+      }
+    ]
+  }
+  ```
+- Curate 30+ queries by translating community KQL to HQL, organized by category:
+  - **entra_id/sign_in** (8+ queries): failed logins by country/IP/user, legacy auth usage, risky sign-ins, deviceCode flow, suspicious user agents, MFA failures, impossible travel (simplified: same user different country), service principal sign-ins
+  - **m365/ual** (8+ queries): new inbox rules, email forwarding, mailbox delegation, OAuth app consent, eDiscovery searches, transport rule changes, audit log tampering, Power Automate flow creation
+  - **entra_id/config** (6+ queries): apps with Mail.ReadWrite, apps with Application.ReadWrite.All, stale service principals, apps with reply URLs to localhost, multi-tenant apps with dangerous permissions, recently created apps
+  - **mde/alerts** (5+ queries): high-severity alerts, alerts by category, alerts with MITRE mapping, machines with most alerts, recent incidents
+  - **azure/activity** (3+ queries): role assignment changes, resource deletions, policy modifications
+- Each query is manually validated: (a) HQL syntax parses in pyhql, (b) field names match actual Goosey output schema, (c) description accurately reflects what the query finds
+- Translation guide document: `docs/HUNTING_QUERY_TRANSLATION.md` documenting the KQL-to-HQL mapping rules, unsupported operators, field name mappings between KQL tables and Goosey output files
+- Validation script: `scripts/validate_hunting_queries.py` — loads catalog, verifies schema completeness, attempts to parse each HQL query with pyhql (syntax check only, no data needed)
+- **Integration:** New file `goosey/data/hunting_queries.json`. New file `scripts/validate_hunting_queries.py`. New file `docs/HUNTING_QUERY_TRANSLATION.md`. No changes to existing code.
+
+##### Wave 2
+**Parallel dispatches:** 2
+**Blocked by:** W1-1
+
+**W2-1: Flask API endpoint for hunting queries** — Weight: S, Gate: none, Deps: W1-1
+- Add to `goosey/web.py`:
+  - `load_hunting_queries()` — Load and cache `hunting_queries.json` from `goosey/data/`
+  - `GET /api/hunting/queries` — Returns catalog with optional filters:
+    - `?category=entra_id` — filter by category
+    - `?mitre_id=T1110` — filter by MITRE ID (prefix match)
+    - `?search=inbox` — substring match on name + description
+    - `?severity=high` — filter by severity
+    - Returns: `{"queries": [...], "categories": [...], "mitre_ids": [...]}`
+  - `GET /api/hunting/queries/<id>` — Returns single query by ID (for deep-linking)
+- Cross-reference with browse tree: add `applicable` boolean field to each returned query indicating whether any collected files match its `target_files` globs (reuse `scan_output_dir` logic)
+- **Integration:** Modify `goosey/web.py` — add 2 new route functions and 1 helper function. Import `hunting_queries.json` using same pattern as `sourcetypes.json`.
+
+**W2-2: File-glob resolution helper** — Weight: S, Gate: none, Deps: W1-1
+- Add to `goosey/web.py` or a new `goosey/hunting.py` module:
+  - `resolve_target_files(target_globs, output_dir)` — Given a list of glob patterns from a hunting query, resolve against the output directory and return matching file paths (relative to output_dir)
+  - Handles Azure subscription subdirectory expansion (`{sub_id}`)
+  - Returns `{"files": [{"path": "...", "size": N, "modified": "..."}], "count": N}`
+- Used by the frontend to auto-select the correct file when a hunting query is clicked
+- `GET /api/hunting/resolve?id=hunt-signin-001` — Resolves target files for a specific query
+- **Integration:** Modify `goosey/web.py` — add 1 route function and 1 helper function.
+
+##### Wave 3
+**Parallel dispatches:** 1
+**Blocked by:** W2-1, W2-2
+
+**W3-1: Frontend hunting queries panel in Browse Data tab** — Weight: L, Gate: approve, Deps: W2-1, W2-2
+- Add "Hunting Queries" section to the Browse Data tab, below the browse tree in the left panel:
+  - Collapsible section header "Hunting Queries (N)" with expand/collapse toggle
+  - Category accordion: Entra ID > Sign-in, Entra ID > Config, M365 > UAL, MDE > Alerts, Azure > Activity
+  - Each query row shows: name, severity badge (color-coded), MITRE ID chips, "applicable" indicator (green dot if matching data exists, grey if not)
+  - Search input above the list — debounced client-side filter on name, description, MITRE ID
+- Click-to-run behavior:
+  1. User clicks a query
+  2. Frontend calls `/api/hunting/resolve?id=<id>` to get matching files
+  3. If exactly 1 file: auto-populate `database("goose").file("<path>") | <hql_query>` into textarea, execute
+  4. If multiple files: show a file picker modal, user selects, then populate and execute
+  5. If no files: show "No matching data collected" toast with link to Collect tab
+  6. Results display in the existing HQL results table
+- Query detail panel: clicking the info icon on a query shows description, source KQL, MITRE technique names, and target file patterns
+- CSS additions within existing `<style>` block — severity badges (critical=red, high=orange, medium=yellow, low=blue, info=grey), MITRE chips, applicable indicator
+- Fetch query catalog on Browse Data tab activation (cached after first load)
+- **Integration:** Modify `goosey/templates/index.html` — add hunting queries section in left panel, JS functions for fetch/filter/click-to-run, CSS for badges/chips. No new template files.
+
+##### Wave 4 (optional polish)
+**Parallel dispatches:** 1
+**Blocked by:** W3-1
+
+**W4-1: Query validation suite and documentation** — Weight: S, Gate: none, Deps: W3-1
+- Run every catalog query against sample test data in `tmp/test_data/` to verify real execution (not just syntax parsing)
+- Fix any queries that fail with actual data (field name mismatches, schema issues)
+- Update `docs/HUNTING_QUERY_TRANSLATION.md` with lessons learned
+- Add contributing guide section for community members to submit new queries
+- **Integration:** Updates to `goosey/data/hunting_queries.json` (fixes), `docs/HUNTING_QUERY_TRANSLATION.md`, `scripts/validate_hunting_queries.py` (add execution tests).
+
+##### Critical Files
+- `goosey/data/hunting_queries.json` — The query catalog; every component depends on this
+- `goosey/web.py` — Flask backend; receives 3 new endpoints
+- `goosey/templates/index.html` — SPA; receives hunting queries panel, click-to-run logic
+- `goosey/hql_compat.py` — HQL execution engine; queries must be compatible with its capabilities and patches
+- `scripts/validate_hunting_queries.py` — Validates catalog completeness and query syntax
+
+##### Decision Log
+<!-- Guardian appends here after wave completion -->
+
+#### hunting-queries Worktree Strategy
+
+Main is sacred. Each wave dispatches parallel worktrees:
+- **Wave 1:** `.worktrees/hunt-catalog` on branch `feature/hunt-catalog`
+- **Wave 2:** `.worktrees/hunt-api` on branch `feature/hunt-api` (both W2-1 and W2-2 in same worktree since they modify the same file)
+- **Wave 3:** `.worktrees/hunt-frontend` on branch `feature/hunt-frontend`
+- **Wave 4:** `.worktrees/hunt-validation` on branch `feature/hunt-validation`
+
+#### hunting-queries References
+
+- Community hunting queries source: https://github.com/Bert-JanP/Hunting-Queries-Detection-Rules
+- HQL supported operators: where, project, summarize (count, sum, avg, min, max, dcount), sort by, take, mv-expand
+- HQL compatibility layer: `goosey/hql_compat.py` (DEC-HQL-001 through DEC-HQL-006)
+- Existing HQL query API: `POST /api/browse/query` in `goosey/web.py`
+- Browse Data tab: `goosey/templates/index.html` lines 462-510
+- Sourcetype registry pattern: `goosey/data/sourcetypes.json` (DEC-BROWSE-001)
+- Goosey output file naming conventions: see goosey-analyzer References section
+- MITRE ATT&CK techniques relevant to M365: T1078, T1110, T1114, T1539, T1564.008, T1098, T1090.003
 
 ---
 
