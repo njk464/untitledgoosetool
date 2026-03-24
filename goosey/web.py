@@ -245,6 +245,9 @@ def get_dump_methods():
 # Module-level cache: populated on first call to load_sourcetypes()
 _sourcetypes_cache = None
 
+# Module-level cache: populated on first call to load_hunting_queries()
+_hunting_queries_cache = None
+
 
 def load_sourcetypes():
     """Load and cache the sourcetypes registry from goosey/data/sourcetypes.json.
@@ -262,6 +265,99 @@ def load_sourcetypes():
         with open(path, 'r', encoding='utf-8') as f:
             _sourcetypes_cache = json.load(f)
     return _sourcetypes_cache
+
+
+def load_hunting_queries():
+    """Load and cache the hunting query catalog from goosey/data/hunting_queries.json.
+
+    The catalog is loaded once at first call and stored in a module-level
+    variable.  Subsequent calls return the cached object without re-reading disk.
+
+    Returns:
+        dict: Parsed hunting_queries.json data with 'version' and 'queries' keys.
+    """
+    global _hunting_queries_cache
+    if _hunting_queries_cache is None:
+        data_dir = os.path.join(os.path.dirname(__file__), 'data')
+        path = os.path.join(data_dir, 'hunting_queries.json')
+        with open(path, 'r', encoding='utf-8') as f:
+            _hunting_queries_cache = json.load(f)
+    return _hunting_queries_cache
+
+
+def resolve_target_files(target_globs, output_dir):
+    """Resolve a list of glob patterns against the output directory.
+
+    Handles the ``{sub_id}`` placeholder by substituting each known Azure
+    subscription ID discovered under ``output_dir/azure/``.  Duplicate paths
+    (from overlapping patterns) are deduplicated.
+
+    PATH SECURITY: all resolved paths are verified with ``os.path.realpath()``
+    to be strictly inside ``output_dir``.  Any path that resolves outside the
+    output directory is silently discarded.
+
+    @decision DEC-HUNT-002
+    @title Mirror _expand_glob_patterns for hunting query file resolution
+    @status accepted
+    @rationale Reuses the same {sub_id} substitution and hidden-file filtering
+      logic already proven in the browse API.  Keeps the two subsystems
+      consistent without duplicating the expansion algorithm into a shared
+      helper (that refactor can happen later if a third consumer appears).
+
+    Args:
+        target_globs: List of glob patterns relative to output_dir (from a
+                      hunting query's ``target_files`` field).
+        output_dir: Absolute path to the root output directory.
+
+    Returns:
+        list[dict]: Sorted list of ``{"path": rel, "size": int, "modified": str}``
+                    dicts for every resolved file, ordered by relative path.
+    """
+    if not target_globs or not os.path.isdir(output_dir):
+        return []
+
+    resolved_base = os.path.realpath(output_dir)
+
+    # Discover Azure subscription IDs (same logic as scan_output_dir)
+    azure_dir = os.path.join(output_dir, 'azure')
+    azure_sub_ids = []
+    if os.path.isdir(azure_dir):
+        for entry in os.scandir(azure_dir):
+            if entry.is_dir() and not entry.name.startswith('.') and entry.name != '.savestate':
+                azure_sub_ids.append(entry.name)
+
+    seen = set()
+    results = []
+
+    for file_glob in target_globs:
+        matches = _expand_glob_patterns(output_dir, file_glob, azure_sub_ids)
+        for abs_path in matches:
+            # Deduplicate
+            real_path = os.path.realpath(abs_path)
+            if real_path in seen:
+                continue
+
+            # Path traversal protection: must be strictly inside output_dir
+            if not real_path.startswith(resolved_base + os.sep) and real_path != resolved_base:
+                continue
+
+            seen.add(real_path)
+
+            try:
+                stat = os.stat(abs_path)
+            except OSError:
+                continue
+
+            rel_path = os.path.relpath(abs_path, output_dir)
+            mtime = datetime.datetime.fromtimestamp(stat.st_mtime).isoformat(timespec='seconds')
+            results.append({
+                'path': rel_path,
+                'size': stat.st_size,
+                'modified': mtime,
+            })
+
+    results.sort(key=lambda x: x['path'])
+    return results
 
 
 def _size_human(nbytes):
@@ -717,6 +813,149 @@ def api_browse_preview():
         'offset': offset,
         'total_lines': total_lines,
         'has_more': has_more,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Hunting Queries API
+#
+# @decision DEC-HUNT-002
+# @title Hunting query catalog endpoints: list+filter and per-ID lookup
+# @status accepted
+# @rationale Provides the browser UI with structured access to the curated
+#   HQL query catalog (hunting_queries.json) without coupling to the browse
+#   API.  File-target resolution reuses _expand_glob_patterns() so {sub_id}
+#   substitution and hidden-file filtering behave identically to browse/files.
+# ---------------------------------------------------------------------------
+
+
+def _build_hunting_index(queries):
+    """Build sorted unique lists of categories and MITRE IDs from query list.
+
+    Args:
+        queries: List of query dicts from hunting_queries.json.
+
+    Returns:
+        tuple: (categories: list[str], mitre_ids: list[str]) both sorted.
+    """
+    categories = sorted({q.get('category', '') for q in queries if q.get('category')})
+    mitre_ids_set = set()
+    for q in queries:
+        for m in q.get('mitre_ids', []):
+            mitre_ids_set.add(m)
+    return categories, sorted(mitre_ids_set)
+
+
+@app.route('/api/hunting/queries')
+def api_hunting_queries():
+    """Return the hunting query catalog with optional filters.
+
+    Query params:
+        category (optional):    Filter to queries matching this category exactly.
+        subcategory (optional): Filter to queries matching this subcategory exactly.
+        mitre_id (optional):    Filter to queries where any mitre_ids entry starts
+                                with this prefix (e.g. 'T1110' matches 'T1110.003').
+        search (optional):      Case-insensitive substring match against name and
+                                description.
+        severity (optional):    Filter to queries matching this severity exactly.
+
+    Returns:
+        200 JSON: {
+            "queries": [...],
+            "total": N,
+            "categories": [unique categories],
+            "mitre_ids": [unique MITRE IDs]
+        }
+    """
+    catalog = load_hunting_queries()
+    queries = list(catalog.get('queries', []))
+
+    category = request.args.get('category', '').strip()
+    subcategory = request.args.get('subcategory', '').strip()
+    mitre_id = request.args.get('mitre_id', '').strip()
+    search = request.args.get('search', '').strip().lower()
+    severity = request.args.get('severity', '').strip()
+
+    if category:
+        queries = [q for q in queries if q.get('category') == category]
+    if subcategory:
+        queries = [q for q in queries if q.get('subcategory') == subcategory]
+    if severity:
+        queries = [q for q in queries if q.get('severity') == severity]
+    if mitre_id:
+        queries = [
+            q for q in queries
+            if any(m.startswith(mitre_id) for m in q.get('mitre_ids', []))
+        ]
+    if search:
+        queries = [
+            q for q in queries
+            if search in q.get('name', '').lower() or search in q.get('description', '').lower()
+        ]
+
+    categories, mitre_ids = _build_hunting_index(queries)
+
+    return jsonify({
+        'queries': queries,
+        'total': len(queries),
+        'categories': categories,
+        'mitre_ids': mitre_ids,
+    })
+
+
+@app.route('/api/hunting/queries/<query_id>')
+def api_hunting_query_by_id(query_id):
+    """Return a single hunting query by its ID.
+
+    Args:
+        query_id: The query identifier (e.g. 'hunt-signin-001').
+
+    Returns:
+        200 JSON: The full query dict.
+        404 JSON: {"error": "..."} if the ID is not found.
+    """
+    catalog = load_hunting_queries()
+    for q in catalog.get('queries', []):
+        if q.get('id') == query_id:
+            return jsonify(q)
+    return jsonify({'error': f'Query not found: {query_id}'}), 404
+
+
+@app.route('/api/hunting/resolve')
+def api_hunting_resolve():
+    """Resolve a hunting query's target_files globs against the output directory.
+
+    Query params:
+        id (required): The query ID to resolve (e.g. 'hunt-signin-001').
+        output_dir (optional): Override the output directory (defaults to app config).
+
+    Returns:
+        200 JSON: {"query_id": "...", "files": [...], "count": N}
+        400 JSON: {"error": "..."} when 'id' is missing.
+        404 JSON: {"error": "..."} when the query ID is not found.
+    """
+    query_id = request.args.get('id', '').strip()
+    if not query_id:
+        return jsonify({'error': 'Required parameter: id'}), 400
+
+    catalog = load_hunting_queries()
+    query = None
+    for q in catalog.get('queries', []):
+        if q.get('id') == query_id:
+            query = q
+            break
+
+    if query is None:
+        return jsonify({'error': f'Query not found: {query_id}'}), 404
+
+    output_dir = _get_output_dir()
+    target_globs = query.get('target_files', [])
+    files = resolve_target_files(target_globs, output_dir)
+
+    return jsonify({
+        'query_id': query_id,
+        'files': files,
+        'count': len(files),
     })
 
 
