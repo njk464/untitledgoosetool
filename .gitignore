@@ -14,7 +14,9 @@ error.log
 .d4iot_conf
 .msgtrace_info
 .venv
+conf
 *.aes
 *.auth*
 *_auth*
 *.conf
+goosey-analyzer/target/
