@@ -157,6 +157,70 @@ try:
 
     _Table.__init__ = _patched_table_init
 
+    # ------------------------------------------------------------------
+    # Monkey-patch: fix MvExpand.explode_table variable name bug
+    # ------------------------------------------------------------------
+    # pyhql's MvExpand.explode_table has a copy-paste bug on line 11:
+    #   if not isinstance(path, pl.Expr):   <-- should be pl_expr, not path
+    # Since `path` is always a list (checked on line 7), this isinstance
+    # check ALWAYS fails, making mv-expand unusable.  Additionally, the
+    # multivalue type check (line 17) may fail when our fallback Table
+    # init bypasses pyhql's schema, so we also skip that guard for Polars
+    # List columns.
+    #
+    # @decision DEC-HQL-006
+    # @title Monkey-patch MvExpand to fix variable name bug and type check
+    # @status accepted
+    # @rationale mv-expand is essential for forensic queries on list fields
+    #   (e.g. UAL ExtendedProperties, ConditionalAccessPolicies).  The bug
+    #   is a clear typo (path vs pl_expr) confirmed by reading the source.
+    _mvexpand_mod = importlib.import_module('Hql.Operators.MvExpand')
+    _MvExpand = _mvexpand_mod.MvExpand
+    _hqlt = importlib.import_module('Hql.Types.Hql').HqlTypes
+
+    def _patched_explode_table(self, ctx, table, limit):
+        schema = table.schema
+        df = table.df
+
+        for to in self.exprs:
+            path = to.expr.eval(ctx, as_list=True)
+            if not isinstance(path, list):
+                from Hql.Exceptions import HqlExceptions as hqle
+                raise hqle.CompilerException(
+                    f'To expression return non-list type {type(path)}')
+
+            pl_expr = to.expr.eval(ctx, as_pl=True)
+            if not isinstance(pl_expr, pl.Expr):
+                from Hql.Exceptions import HqlExceptions as hqle
+                raise hqle.CompilerException(
+                    f'To expression return non-Expr type {type(pl_expr)}')
+
+            # Check schema type — allow both pyhql multivalue and Polars List
+            col_name = path[-1] if path else None
+            to_schema = schema.get_type(path).schema
+            is_list_col = isinstance(to_schema, _hqlt.multivalue)
+            if not is_list_col and col_name and col_name in df.columns:
+                # Fallback: check Polars dtype directly
+                is_list_col = isinstance(df[col_name].dtype, pl.List)
+
+            if not is_list_col:
+                continue
+
+            new_type = to_schema.inner if isinstance(
+                to_schema, _hqlt.multivalue) else to_schema
+            df = df.with_columns(
+                pl_expr.list.slice(0, limit)
+            ).explode(pl_expr)
+
+            if to.to:
+                new_type = to.to
+
+            schema.set(path, new_type)
+
+        return _Table(df=df, schema=schema, name=table.name)
+
+    _MvExpand.explode_table = _patched_explode_table
+
 except ImportError:
     pass  # pyhql or ndjson not installed; errors will surface at query time
 
