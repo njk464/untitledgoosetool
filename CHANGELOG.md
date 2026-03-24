@@ -10,6 +10,7 @@ All notable changes to this project will be documented in this file.
 - Web UI: Fix Jinja2 template syntax error in JSDoc comment (index.html line 1580)
 
 ### Added
+- Hunting: 40 curated HQL hunting queries across 5 categories (sign-in, UAL, config, MDE, Azure) with validation script and KQL-to-HQL translation guide
 - Entra ID: administrative units and cross-tenant access policy endpoints for forensic coverage
 - MDE: 8 new advanced hunting tables (DeviceInfo, DeviceNetworkInfo, Defender XDR tables)
 - Azure: VNet flow logs collection (`dump_vnet_flow_logs`) with NSG flow log deprecation notice
