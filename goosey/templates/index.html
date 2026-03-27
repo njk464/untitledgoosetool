@@ -995,7 +995,20 @@ function startProgressPolling(outputDir) {
             </div>
           </div>`;
         }
-        container.innerHTML = html;
+        const allDone = Object.values(data).every(info => info.status === 'done' || info.status === 'FAILED');
+        if (allDone) {
+          container.innerHTML = html;
+          setTimeout(() => {
+            const succeeded = Object.values(data).filter(i => i.status === 'done').length;
+            const failed = Object.values(data).filter(i => i.status === 'FAILED').length;
+            const total = Object.keys(data).length;
+            container.innerHTML = `<div style="cursor:pointer; padding:6px 10px; background:#1a2332; border-radius:4px; font-size:12px; color:#b0bec5;" onclick="this.nextElementSibling.style.display = this.nextElementSibling.style.display === 'none' ? 'block' : 'none'">
+              Collection complete: ${succeeded}/${total} succeeded${failed ? ', ' + failed + ' failed' : ''} <span style="float:right">&#9660;</span>
+            </div><div style="display:none">${html}</div>`;
+          }, 3000);
+        } else {
+          container.innerHTML = html;
+        }
       })
       .catch(() => {});
   }, 1000);

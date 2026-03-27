@@ -4,6 +4,7 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 ### Fixed
+- Entra ID: Fix hang bugs in sign-in log collection (missing nextLink exits, retry overflow) and collapse progress bars on completion
 - Web UI: Fix dump_ key naming bug in conf save/load (keys written with `dump_` prefix caused data_dump() method lookup failures)
 - Web UI: Replace tqdm progress bars with JSON-based progress polling (tqdm ANSI output corrupted web UI terminal)
 - HQL: Increase max_file_size_mb from 200 to 1024 (1 GB) for large forensic exports
