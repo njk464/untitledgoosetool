@@ -582,6 +582,7 @@
         </div>
         <div class="col-lg-7">
           <div class="section-title">Output</div>
+          <div id="collect-progress" style="display:none; margin-bottom: 10px;"></div>
           <div class="output-area" id="collect-output" style="height: 550px;"></div>
           <div class="input-bar" id="collect-input-bar">
             <span class="input-label" id="collect-input-label">Input:</span>
@@ -711,6 +712,9 @@ const PROMPT_RE = /[:?]\s*$|\(y\/n\)\s*[:?]?\s*$/i;
 
 // ---- Helpers ----
 function appendOutput(elId, text, cls) {
+  // Skip tqdm progress bar output (contains ANSI escape codes or bare \r).
+  // Progress is shown via the HTML progress bars polled from /api/progress.
+  if (/\x1b\[|[\r]/.test(text) && !text.startsWith('[')) return;
   const el = document.getElementById(elId);
   const span = document.createElement('span');
   if (cls) span.className = cls;
@@ -900,7 +904,7 @@ function renderDumpMethods(methods, conf) {
     container.appendChild(card);
     const grid = card.querySelector(`#dump-grid-${platform}`);
     for (const m of items) {
-      const checked = (confSection[`dump_${m.key}`] || '').toLowerCase() === 'true';
+      const checked = (confSection[m.key] || '').toLowerCase() === 'true';
       const div = document.createElement('div');
       div.className = 'dump-item';
       div.innerHTML = `
@@ -939,7 +943,7 @@ function saveConf() {
     const platform = el.dataset.platform;
     const key = el.dataset.key;
     if (!conf[platform]) conf[platform] = {};
-    conf[platform][`dump_${key}`] = el.checked ? 'true' : '';
+    conf[platform][key] = el.checked ? 'true' : '';
   });
   // Gather auth fields
   const auth = {};
@@ -961,6 +965,47 @@ function saveConf() {
     document.getElementById('conf-status').style.color = '#64ffda';
     setTimeout(() => { document.getElementById('conf-status').textContent = ''; document.getElementById('conf-status').style.color = ''; }, 2000);
   });
+}
+
+// ---- Collect progress bars ----
+let progressInterval = null;
+
+function startProgressPolling(outputDir) {
+  const container = document.getElementById('collect-progress');
+  container.style.display = 'block';
+  container.innerHTML = '<div class="text-muted small">Waiting for tasks to start...</div>';
+
+  progressInterval = setInterval(() => {
+    fetch(`/api/progress?output_dir=${encodeURIComponent(outputDir)}`)
+      .then(r => r.json())
+      .then(data => {
+        if (!data || Object.keys(data).length === 0) return;
+        let html = '';
+        for (const [name, info] of Object.entries(data)) {
+          const pct = info.total > 0 ? Math.round((info.current / info.total) * 100) : 0;
+          const status = info.status || 'running';
+          const barColor = status === 'done' ? '#64ffda' : status === 'FAILED' ? '#ff5252' : '#00bcd4';
+          html += `<div style="margin-bottom: 6px;">
+            <div style="display:flex; justify-content:space-between; font-size:12px; color:#b0bec5;">
+              <span>${name}</span>
+              <span>${status}${info.total > 1 ? ' \u2014 ' + info.current + '/' + info.total + ' ' + (info.unit || '') : ''}</span>
+            </div>
+            <div style="background:#1a2332; border-radius:4px; height:8px; overflow:hidden;">
+              <div style="background:${barColor}; height:100%; width:${pct}%; transition:width 0.3s;"></div>
+            </div>
+          </div>`;
+        }
+        container.innerHTML = html;
+      })
+      .catch(() => {});
+  }, 1000);
+}
+
+function stopProgressPolling() {
+  if (progressInterval) {
+    clearInterval(progressInterval);
+    progressInterval = null;
+  }
 }
 
 // ---- Collect ----
@@ -986,9 +1031,13 @@ function runCollect() {
   document.getElementById('collect-run-btn').disabled = true;
   document.getElementById('collect-stop-btn').disabled = false;
 
+  const outputDir = v('honk-output_dir') || 'output';
+  startProgressPolling(outputDir);
+
   streamCommand('honk', args, 'collect-output', () => {
     document.getElementById('collect-run-btn').disabled = false;
     document.getElementById('collect-stop-btn').disabled = true;
+    stopProgressPolling();
   });
 }
 
@@ -1003,6 +1052,7 @@ function stopCollect() {
   hideInputBar('collect');
   document.getElementById('collect-run-btn').disabled = false;
   document.getElementById('collect-stop-btn').disabled = true;
+  stopProgressPolling();
 }
 
 // ---- Init ----

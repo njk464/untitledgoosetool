@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 ### Fixed
+- Web UI: Fix dump_ key naming bug in conf save/load (keys written with `dump_` prefix caused data_dump() method lookup failures)
+- Web UI: Replace tqdm progress bars with JSON-based progress polling (tqdm ANSI output corrupted web UI terminal)
 - HQL: Increase max_file_size_mb from 200 to 1024 (1 GB) for large forensic exports
 - HQL: Bump Schema sample_size from 100 to 10000 for reliable type inference on heterogeneous NDJSON
 - HQL: Fallback from to_dicts() to write_json() for Polars Struct columns (nested JSON fields)
