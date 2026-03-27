@@ -329,6 +329,7 @@ async def get_nextlink(url, outfile, session, logger, auth):
     retries = DEFAULT_RETRIES
     while url:
         try:
+            skiptoken = 'unknown'
             if '$skiptoken' in url:
                 skiptoken = url.split('skiptoken=')[1]
             elif '$skip' in url:
@@ -358,6 +359,13 @@ async def get_nextlink(url, outfile, session, logger, auth):
                     url = None
         except asyncio.TimeoutError:
             logger.error('TimeoutError has occurred on {}'.format(skiptoken))
+            if retries == 0:
+                logger.info('Error. No more retries after timeout on {}.'.format(skiptoken))
+                url = None
+            else:
+                retries -= 1
+                logger.info('Retrying {} up to {} more times'.format(skiptoken, retries))
+                await asyncio.sleep(5)
         except Exception as e:
             if retries == 0:
                 logger.info('Error. No more retries on {}.'.format(skiptoken))
@@ -378,6 +386,9 @@ async def get_nextlink(url, outfile, session, logger, auth):
                         retries -= 1
                 except AttributeError as a:
                     logger.error('Error on nextLink retrieval {}: {}'.format(skiptoken, str(e)))
+                    retries -= 1
+                    if retries == 0:
+                        url = None
 
 async def run_kql_query(query, start, end, bounds, url, app_auth, logger, session, threshold=LAW_QUERY_THRESHOLD, summarize=False):
     """Execute a KQL query against an Azure Log Analytics workspace.
@@ -590,7 +601,7 @@ async def helper_single_object(endpoint, params, failurefile=None, retries=5, ca
             logger.info('Dumping %s information...' % (name))
             outfile = os.path.join(output_dir, name + '.json')
 
-            async with session.get(url, headers=header, raise_for_status=True) as r:
+            async with session.get(url, headers=header, raise_for_status=True, timeout=600) as r:
                 result = await r.json()
                 nexturl = None
 

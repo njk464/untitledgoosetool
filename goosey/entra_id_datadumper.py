@@ -415,7 +415,7 @@ class EntraIdDataDumper(DataDumper):
             retries = 5
             while nexturl:
                 try:
-                    skiptoken = nexturl.split('skiptoken=')[1]
+                    skiptoken = nexturl.split('skiptoken=')[1] if 'skiptoken=' in nexturl else 'unknown'
                     async with self.ahsession.get(nexturl, headers=header, timeout=600) as r2:
                         result2 = await r2.json()
                         self.logger.debug('Received nextLink %s: %s' % (parent, skiptoken))
@@ -440,6 +440,7 @@ class EntraIdDataDumper(DataDumper):
                     else:
                         self.logger.info('Error. Retrying {} up to {} more times'.format(skiptoken, retries))
                         retries -= 1
+                        await asyncio.sleep(5)
 
         self.logger.info('Dumping %s %s information...' % (parent, child))
         child_list = []
@@ -447,60 +448,65 @@ class EntraIdDataDumper(DataDumper):
             url2 = url_parent + parent + "/" + parent_id + '/%s' % (child)
             if child == 'appRoleAssignedResources':
                 header['ConsistencyLevel'] = 'eventual'
-            async with self.ahsession.get(url2, headers=header) as r:
-                result = await r.json()
-                if 'value' not in result:
-                    if child == 'federationConfiguration':
-                        continue
-                    if result['error']['code'] == 'InvalidAuthenticationToken':
-                        self.logger.error("Error with authentication token: " + result['error']['message'])
-                        self.logger.error("Please re-auth.")
-                        asyncio.get_event_loop().stop()
-                    else:
-                        self.logger.debug("Error with result: {}".format(str(result)))
-                        return
-
-                nexturl = None
-                for entry in result['value']:
-                    if "@odata.type" in entry.keys():
-                        entry.pop("@odata.type")
-                    temp = {parent : parent_entry_dict[parent_id]}
-                    entry.update(temp)
-                    child_list.append(entry)
-
-                if '@odata.nextLink' in result:
-                    nexturl = result['@odata.nextLink']
-                retries = 5
-                while nexturl:
-                    try:
-                        skiptoken = nexturl.split('skiptoken=')[1]
-                        async with self.ahsession.get(nexturl, headers=header, timeout=600) as r2:
-                            result2 = await r2.json()
-                            self.logger.debug('Received nextLink %s: %s' % (parent, skiptoken))
-                            for entry in result2['value']:
-                                if "@odata.type" in entry.keys():
-                                    entry.pop("@odata.type")
-                                temp = {parent: parent_entry_dict[parent_id]}
-                                entry.update(temp)
-                                child_list.append(entry)
-
-                            if '@odata.nextLink' in result2:
-                                if result2['@odata.nextLink'] == nexturl:
-                                    self.logger.warning("@odata.nextLink received is same as current. Setting nextLink to None.")
-                                    nexturl = None
-                                else:
-                                    nexturl = result2['@odata.nextLink']
-                                    retries = 5
-                            else:
-                                nexturl = None
-                    except Exception as e:
-                        self.logger.error('Error on nextLink retrieval {}: {}'.format(skiptoken, str(e)))
-                        if retries == 0:
-                            self.logger.info('Error. No more retries on {}.'.format(skiptoken))
-                            nexturl = None
+            try:
+                async with self.ahsession.get(url2, headers=header, timeout=600) as r:
+                    result = await r.json()
+                    if 'value' not in result:
+                        if child == 'federationConfiguration':
+                            continue
+                        if result['error']['code'] == 'InvalidAuthenticationToken':
+                            self.logger.error("Error with authentication token: " + result['error']['message'])
+                            self.logger.error("Please re-auth.")
+                            asyncio.get_event_loop().stop()
                         else:
-                            self.logger.info('Error. Retrying {} up to {} more times'.format(skiptoken, retries))
-                            retries -= 1
+                            self.logger.debug("Error with result: {}".format(str(result)))
+                            return
+
+                    nexturl = None
+                    for entry in result['value']:
+                        if "@odata.type" in entry.keys():
+                            entry.pop("@odata.type")
+                        temp = {parent : parent_entry_dict[parent_id]}
+                        entry.update(temp)
+                        child_list.append(entry)
+
+                    if '@odata.nextLink' in result:
+                        nexturl = result['@odata.nextLink']
+                    retries = 5
+                    while nexturl:
+                        try:
+                            skiptoken = nexturl.split('skiptoken=')[1] if 'skiptoken=' in nexturl else 'unknown'
+                            async with self.ahsession.get(nexturl, headers=header, timeout=600) as r2:
+                                result2 = await r2.json()
+                                self.logger.debug('Received nextLink %s: %s' % (parent, skiptoken))
+                                for entry in result2['value']:
+                                    if "@odata.type" in entry.keys():
+                                        entry.pop("@odata.type")
+                                    temp = {parent: parent_entry_dict[parent_id]}
+                                    entry.update(temp)
+                                    child_list.append(entry)
+
+                                if '@odata.nextLink' in result2:
+                                    if result2['@odata.nextLink'] == nexturl:
+                                        self.logger.warning("@odata.nextLink received is same as current. Setting nextLink to None.")
+                                        nexturl = None
+                                    else:
+                                        nexturl = result2['@odata.nextLink']
+                                        retries = 5
+                                else:
+                                    nexturl = None
+                        except Exception as e:
+                            self.logger.error('Error on nextLink retrieval {}: {}'.format(skiptoken, str(e)))
+                            if retries == 0:
+                                self.logger.info('Error. No more retries on {}.'.format(skiptoken))
+                                nexturl = None
+                            else:
+                                self.logger.info('Error. Retrying {} up to {} more times'.format(skiptoken, retries))
+                                retries -= 1
+                                await asyncio.sleep(5)
+            except Exception as e:
+                self.logger.error('Error fetching child %s for %s %s: %s' % (child, parent, parent_id, str(e)))
+                continue
 
         if '/' in child:
             temp = child.split('/')
