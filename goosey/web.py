@@ -17,6 +17,7 @@ import glob as glob_module
 import json
 import os
 import queue
+import re
 import select
 import subprocess
 import sys
@@ -982,24 +983,157 @@ def api_get_conf():
 
 @app.route("/api/conf", methods=["POST"])
 def api_save_conf():
+    """Save configuration from the web UI.
+
+    Calls genconf() to produce a properly structured .conf file with comments
+    and correct key names (without the dump_ prefix that DataDumper.data_dump()
+    strips when resolving method names). After genconf writes the file, individual
+    dump method selections are patched in from the submitted form data.
+
+    @decision DEC-WEBCONF-001
+    @title Use genconf() for .conf writes to ensure correct key structure
+    @status accepted
+    @rationale The frontend sends dump method keys without the dump_ prefix
+      (e.g. ual=true), matching what honk.py/parse_config expects. Using
+      genconf() guarantees the file is fully structured with comments and all
+      required sections, then we patch individual dump selections afterward.
+    """
+    # Imported inside the function to avoid circular imports at module load time
+    from goosey.conf import genconf
+
     data = request.json
-    if "conf" in data:
-        write_conf(data["conf"])
-    if "auth" in data:
-        # Only save auth if values aren't masked
-        auth_data = data["auth"]
-        existing = read_auth()
-        for section, values in auth_data.items():
-            for k, v in values.items():
-                if v == "********" and section in existing and k in existing[section]:
-                    auth_data[section][k] = existing[section][k]
-        path = os.path.join(get_working_dir(), ".auth")
-        config = configparser.ConfigParser()
-        for section, values in auth_data.items():
-            config[section] = values
-        with open(path, "w") as f:
-            config.write(f)
+    conf_data = data.get("conf", {})
+    auth_data = data.get("auth", {})
+
+    # --- Auth: restore masked values from the existing .auth file ---
+    existing_auth = read_auth()
+    for section, values in auth_data.items():
+        for k, v in values.items():
+            if v == "********" and section in existing_auth and k in existing_auth[section]:
+                auth_data[section][k] = existing_auth[section][k]
+
+    # Write the (unmasked) .auth file so genconf sees it and skips interactive prompts
+    auth_path = os.path.join(get_working_dir(), ".auth")
+    auth_cfg = configparser.ConfigParser()
+    for section, values in auth_data.items():
+        auth_cfg[section] = values
+    with open(auth_path, "w") as f:
+        auth_cfg.write(f)
+
+    # --- Build genconf keyword arguments from submitted conf sections ---
+    auth_section = auth_data.get("auth", {})
+    config_section = conf_data.get("config", {})
+    filters_section = conf_data.get("filters", {})
+    variables_section = conf_data.get("variables", {})
+
+    # Collect dump method selections per platform (keys WITHOUT dump_ prefix)
+    platform_sections = ("azure", "entraid", "m365", "mde")
+    dict_config = {}
+    for platform in platform_sections:
+        if platform in conf_data:
+            dict_config[platform] = {
+                k: (v.lower() == "true" if isinstance(v, str) else bool(v))
+                for k, v in conf_data[platform].items()
+            }
+
+    # Determine which platforms have at least one method enabled (for genconf flags)
+    def _any_enabled(platform):
+        return any(dict_config.get(platform, {}).values())
+
+    def _str_or_none(val):
+        return val if val not in (None, "") else None
+
+    def _int_or_default(val, default):
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            return default
+
+    genconf_kwargs = dict(
+        outpath_auth=auth_path,
+        outpath_conf=os.path.join(get_working_dir(), ".conf"),
+        auth_appid=_str_or_none(auth_section.get("appid")),
+        auth_clientsecret=_str_or_none(auth_section.get("clientsecret")),
+        auth_ests_cookie=_str_or_none(auth_section.get("ests_cookie")),
+        auth_portal_refresh_token=_str_or_none(auth_section.get("portal_refresh_token")),
+        config_tenant=_str_or_none(config_section.get("tenant")),
+        config_gcc=(config_section.get("gcc", "false").lower() == "true"),
+        config_gcc_high=(config_section.get("gcc_high", "false").lower() == "true"),
+        config_subscriptionid=config_section.get("subscriptionid", "All") or "All",
+        filters_date_start=_str_or_none(filters_section.get("date_start")),
+        filters_date_end=_str_or_none(filters_section.get("date_end")),
+        variable_ual_threshold=_int_or_default(variables_section.get("ual_threshold"), 5000),
+        variable_max_ual_tasks=_int_or_default(variables_section.get("max_ual_tasks"), 5),
+        variable_ual_extra_start=_str_or_none(variables_section.get("ual_extra_start")),
+        variable_ual_extra_end=_str_or_none(variables_section.get("ual_extra_end")),
+        variable_ual_record_type=_str_or_none(variables_section.get("ual_record_type")),
+        variable_ual_operations=_str_or_none(variables_section.get("ual_operations")),
+        variable_ual_user_ids=_str_or_none(variables_section.get("ual_user_ids")),
+        variable_ual_free_text=_str_or_none(variables_section.get("ual_free_text")),
+        variable_ual_ip_addresses=_str_or_none(variables_section.get("ual_ip_addresses")),
+        variable_ual_object_ids=_str_or_none(variables_section.get("ual_object_ids")),
+        variable_mde_threshold=_int_or_default(variables_section.get("mde_threshold"), 10000),
+        variable_mde_query_mode=variables_section.get("mde_query_mode", "table") or "table",
+        azure=_any_enabled("azure"),
+        entraid=_any_enabled("entraid"),
+        m365=_any_enabled("m365"),
+        mde=_any_enabled("mde"),
+        dict_config=dict_config,
+        new=True,
+        insecure=True,
+    )
+
+    try:
+        genconf(**genconf_kwargs)
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+    # --- Patch individual dump method selections into the written .conf ---
+    # genconf sets all methods for a platform to True/False based on the platform
+    # flag.  We now overwrite each key with the per-method selection the user chose.
+    conf_path = os.path.join(get_working_dir(), ".conf")
+    if dict_config:
+        with open(conf_path, "r") as f:
+            conf_text = f.read()
+        for platform, methods in dict_config.items():
+            for key, enabled in methods.items():
+                target_value = "True" if enabled else "False"
+                # Replace "key=True" or "key=False" (case-insensitive value) within
+                # the appropriate section.  Simple line-by-line replacement is safe
+                # because genconf writes one key per line.
+                conf_text = re.sub(
+                    r'(?i)^(' + re.escape(key) + r'\s*=\s*)(?:true|false)',
+                    r'\g<1>' + target_value,
+                    conf_text,
+                    flags=re.MULTILINE,
+                )
+        with open(conf_path, "w") as f:
+            f.write(conf_text)
+
     return jsonify({"status": "ok"})
+
+
+@app.route("/api/progress")
+def api_progress():
+    """Return the current progress state from .progress.json in the output directory.
+
+    Query params:
+        output_dir (optional): Output directory name, relative to working dir.
+                               Defaults to "output".
+
+    Returns:
+        200 JSON: Dict of task_name -> {current, total, status, unit} objects,
+                  or {} if the file does not exist or cannot be parsed.
+    """
+    output_dir = request.args.get("output_dir", "output")
+    path = os.path.join(get_working_dir(), output_dir, ".progress.json")
+    if not os.path.isfile(path):
+        return jsonify({})
+    try:
+        with open(path) as f:
+            return jsonify(json.load(f))
+    except (json.JSONDecodeError, IOError):
+        return jsonify({})
 
 
 @app.route("/api/run", methods=["POST"])
