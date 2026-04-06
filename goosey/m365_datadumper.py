@@ -22,6 +22,7 @@ import sys
 import time
 import urllib.parse
 import random
+import zlib
 
 from aiohttp.client_exceptions import *
 from datetime import datetime, timedelta
@@ -97,7 +98,8 @@ class M365DataDumper(DataDumper):
                'Authorization': f"Bearer {access_token}",
                'X-ResponseFormat': 'json',
                'X-CmdletName': cmdlet,
-               'X-ClientApplication': 'ExoManagementModule'
+               'X-ClientApplication': 'ExoManagementModule',
+               'Accept-Encoding': 'gzip, deflate'
         }
 
         raw_payload = {
@@ -114,9 +116,32 @@ class M365DataDumper(DataDumper):
         self.logger.debug(raw_payload)
 
         try:
-            async with self.ahsession.request("POST", url=url, headers=headers, data=data, timeout=timeout) as r:
-                result = await r.text()
-                result = json.loads(result)
+            async with self.ahsession.request("POST", url=url, headers=headers, data=data, timeout=timeout, auto_decompress=False) as r:
+                raw = await r.read()
+                # The EXO AdminAPI may claim Content-Encoding: gzip but send
+                # uncompressed or raw-deflate data. Try all decompression
+                # methods, falling back to plain UTF-8 if none work.
+                text = None
+                for wbits in (zlib.MAX_WBITS | 16, -zlib.MAX_WBITS, zlib.MAX_WBITS):
+                    try:
+                        text = zlib.decompress(raw, wbits).decode('utf-8')
+                        break
+                    except zlib.error:
+                        continue
+                if text is None:
+                    text = raw.decode('utf-8', errors='replace')
+                self.logger.debug(f"EXO response: status={r.status}, body_len={len(raw)}")
+                if not text.strip() or all(b == 0 for b in raw):
+                    err = f"Empty/null response (HTTP {r.status})"
+                    if r.status == 403:
+                        self.logger.error(
+                            "EXO AdminAPI returned 403. The app's Exchange Online "
+                            "service principal or role group may not be configured. "
+                            "Run 'goosey setup --create' or use New-ServicePrincipal "
+                            "in Exchange Online PowerShell."
+                        )
+                    return result, err
+                result = json.loads(text)
                 result["status"] = r.status
                 if r.status == 401:
                     self.logger.error("Detected 401 unauthorized for EXO cmdlet %s." % cmdlet)

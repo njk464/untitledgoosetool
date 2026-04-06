@@ -418,39 +418,30 @@
     <!-- ============== SETUP TAB ============== -->
     <div class="tab-pane fade show active" id="tab-setup">
       <div class="row">
-        <div class="col-lg-5">
+        <div class="col-lg-8 mx-auto">
           <div class="card mb-3">
             <div class="card-header"><h6 class="mb-0">App Registration Setup</h6></div>
             <div class="card-body">
-              <p class="small text-muted">Create or delete the Entra ID app registration, service principal, API permissions, and Exchange Online configuration.</p>
-              <div class="mb-3">
-                <label class="form-label">Application Name</label>
-                <input type="text" class="form-control form-control-sm" id="setup-app_name" value="GooseApp">
+              <p>Goosey requires an Entra ID app registration with API permissions and an Exchange Online service principal. This must be configured via PowerShell because Microsoft restricts the required Exchange Online admin cmdlets to the EXO PowerShell module.</p>
+              <h6 class="mt-3">Option 1: Azure CloudShell (Recommended)</h6>
+              <ol class="small">
+                <li>Open <a href="https://shell.azure.com" target="_blank">Azure CloudShell</a> and select <strong>PowerShell</strong></li>
+                <li>Upload <code>scripts/Create_SP.ps1</code> to your CloudShell session</li>
+                <li>Run: <code>./Create_SP.ps1</code></li>
+                <li>Follow the prompts to create the app registration and Exchange configuration</li>
+                <li>Copy the generated <strong>App ID</strong> and <strong>Client Secret</strong> into your <code>.auth</code> file</li>
+              </ol>
+              <h6 class="mt-3">Option 2: Local PowerShell</h6>
+              <ol class="small">
+                <li>Install the <a href="https://learn.microsoft.com/en-us/powershell/exchange/install-exo-module" target="_blank">Exchange Online Management module</a>: <code>Install-Module ExchangeOnlineManagement</code></li>
+                <li>Run: <code>pwsh scripts/Create_SP.ps1</code></li>
+                <li>Follow the prompts to create the app registration and Exchange configuration</li>
+                <li>Copy the generated <strong>App ID</strong> and <strong>Client Secret</strong> into your <code>.auth</code> file</li>
+              </ol>
+              <div class="alert alert-info mt-3 small mb-0">
+                <strong>Why PowerShell?</strong> Microsoft restricts the <code>New-ServicePrincipal</code> and <code>New-RoleGroup</code> Exchange Online cmdlets to their first-party PowerShell module. These cmdlets are required to register an app for Exchange Online API access. All other Goosey operations (authentication, data collection, analysis) work from this web UI.
               </div>
-              <div class="row mb-3">
-                <div class="col">
-                  <div class="form-check"><input class="form-check-input" type="radio" name="setup-action" id="setup-create" value="create" checked><label class="form-check-label" for="setup-create">Create</label></div>
-                </div>
-                <div class="col">
-                  <div class="form-check"><input class="form-check-input" type="radio" name="setup-action" id="setup-delete" value="delete"><label class="form-check-label" for="setup-delete">Delete</label></div>
-                </div>
-              </div>
-              <div class="form-check mb-1"><input class="form-check-input" type="checkbox" id="setup-force"><label class="form-check-label" for="setup-force">Force (skip prompts)</label></div>
-              <div class="form-check mb-1"><input class="form-check-input" type="checkbox" id="setup-no_subscriptions"><label class="form-check-label" for="setup-no_subscriptions">No subscriptions (skip IAM roles)</label></div>
-              <div class="form-check mb-1"><input class="form-check-input" type="checkbox" id="setup-gcc_high"><label class="form-check-label" for="setup-gcc_high">GCC High</label></div>
-              <div class="form-check mb-1"><input class="form-check-input" type="checkbox" id="setup-insecure"><label class="form-check-label" for="setup-insecure">Insecure (no file encryption)</label></div>
-              <div class="form-check mb-3"><input class="form-check-input" type="checkbox" id="setup-debug"><label class="form-check-label" for="setup-debug">Debug</label></div>
-              <button class="btn btn-goose w-100" onclick="runSetup()">Run Setup</button>
             </div>
-          </div>
-        </div>
-        <div class="col-lg-7">
-          <div class="section-title">Output</div>
-          <div class="output-area" id="setup-output"></div>
-          <div class="input-bar" id="setup-input-bar">
-            <span class="input-label" id="setup-input-label">Input:</span>
-            <input type="text" id="setup-input" placeholder="Type your response and press Enter...">
-            <button onclick="sendInput('setup')">Send</button>
           </div>
         </div>
       </div>
@@ -703,7 +694,7 @@
 <script>
 // ---- State ----
 // Track active task ID per output panel so input can be routed correctly
-const panelTasks = {};  // { 'setup': taskId, 'collect': taskId }
+const panelTasks = {};  // { 'collect': taskId }
 
 // Password-like prompt patterns
 const PASSWORD_RE = /password|secret|encryption|credential/i;
@@ -824,7 +815,7 @@ function streamCommand(command, args, outputElId, onDone) {
 // ---- Input bar key handlers ----
 document.addEventListener('keydown', e => {
   if (e.key !== 'Enter') return;
-  for (const panel of ['setup', 'collect']) {
+  for (const panel of ['collect']) {
     const input = document.getElementById(`${panel}-input`);
     if (document.activeElement === input) {
       e.preventDefault();
@@ -833,21 +824,6 @@ document.addEventListener('keydown', e => {
     }
   }
 });
-
-// ---- Setup ----
-function runSetup() {
-  const args = [];
-  const name = document.getElementById('setup-app_name').value;
-  if (name) args.push(`--app_name=${name}`);
-  const action = document.querySelector('input[name="setup-action"]:checked').value;
-  args.push(`--${action}`);
-  if (document.getElementById('setup-force').checked) args.push('--force');
-  if (document.getElementById('setup-no_subscriptions').checked) args.push('--no_subscriptions');
-  if (document.getElementById('setup-gcc_high').checked) args.push('--gcc_high');
-  if (document.getElementById('setup-insecure').checked) args.push('--insecure');
-  if (document.getElementById('setup-debug').checked) args.push('--debug');
-  streamCommand('setup', args, 'setup-output');
-}
 
 // ---- Configure ----
 function loadConf() {
