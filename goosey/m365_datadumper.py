@@ -25,7 +25,7 @@ import random
 import zlib
 
 from aiohttp.client_exceptions import *
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from goosey.datadumper import DataDumper
 from goosey.progress import get_progress_manager
 from goosey.utils import *
@@ -721,7 +721,33 @@ class M365DataDumper(DataDumper):
 
         return start, end
 
-    async def _new_ual_timeframe(self, start, end, retries=5, statefile=None, boundsfile=None, session_results=[], sessionId=None, isolated=False, caller="", ual_progress=None, range_total_hours=None):
+    def get_ual_dumper_stats(self, statefile=None):
+        """Return progress stats for the UAL dumper.
+
+        Returns tuple of (total_estimated_logs, estimated_completion_time, current_rate).
+        """
+        if statefile is None:
+            return None
+        current_state = load_state(statefile, is_datetime=False, time_range=True)
+
+        total_time_saved = 0
+        for time_range in current_state:
+            total_time_saved += (time_range["end"] - time_range["start"]).total_seconds()
+
+        current_run_difference = total_time_saved - self.initial_total_time_saved
+        time_elapsed = (datetime.now(timezone.utc) - self.ual_dumper_start).total_seconds()
+
+        time_period_pulled = max(current_run_difference, 1)
+        total_time_period = self.total_time_to_be_pulled
+        percent_done = (current_run_difference / total_time_period) * 100
+        total_estimated_logs = (self.total_ual_logs_saved / time_period_pulled) * total_time_period
+        estimated_eta = self.ual_dumper_start.timestamp() + (time_elapsed / max(self.total_ual_logs_saved, 1)) * total_estimated_logs
+        estimated_eta = datetime.utcfromtimestamp(estimated_eta)
+        rate = int(self.total_ual_logs_saved / max(time_elapsed, 1) * 60 * 60)
+        self.logger.debug(f"{percent_done:.1f}% Done | Rate: {rate} logs/hour | Saved: {self.total_ual_logs_saved} | ETA: {estimated_eta}")
+        return (total_estimated_logs, estimated_eta, rate)
+
+    async def _new_ual_timeframe(self, start, end, retries=20, statefile=None, boundsfile=None, session_results=[], sessionId=None, isolated=False, caller="", ual_progress=None, range_total_hours=None):
         """Core UAL collection engine: searches a time range and collects all audit logs.
 
         This implements a binary-search approach to handle large log volumes:
@@ -766,6 +792,13 @@ class M365DataDumper(DataDumper):
         tries = 0
         total_duplicates = 0
         continuing = False
+        error = None
+
+        # Dynamic session timeout: doubles when small time windows keep timing out
+        SESSION_TIMEOUT_BASE_ORIG = 60
+        if isolated:
+            SESSION_TIMEOUT_BASE_ORIG = 1200
+        SESSION_TIMEOUT_BASE = SESSION_TIMEOUT_BASE_ORIG
 
         # Time-based progress tracking (only for non-isolated parent tasks)
         orig_start = start
@@ -824,7 +857,7 @@ class M365DataDumper(DataDumper):
             bound = f'[{startDate} - {endDate}]'
             # Inner loop: pages through results within a single session/time slice
             status_code = None
-            session_timeout = 60
+            session_timeout = SESSION_TIMEOUT_BASE
             data_saved = False
             new_task_created = False
 
@@ -862,18 +895,25 @@ class M365DataDumper(DataDumper):
                 first_iteration = False
                 response, err = await self.run_exo_cmdlet("Search-UnifiedAuditLog", parameters, timeout=session_timeout)
 
-                if err != None and "TimeoutError" in err:
-                    # Timeout usually indicates too many logs. Need to reduce bounds
-                    self.logger.debug(f"Encountered Timeout Error {err}")
-                    new_end_ts = start.timestamp() + ((end.timestamp() - start.timestamp())/2)
-                    end = datetime.fromtimestamp(new_end_ts).replace(microsecond=0)
+                if err is not None and ("TimeoutError" in err or "timed out" in err):
+                    # Timeout usually indicates too many logs. Need to reduce bounds.
+                    # But if the time window is already very small, double the timeout instead.
+                    self.logger.error(f"Encountered Timeout Error {err}")
+                    error = err
+                    if end - start > timedelta(minutes=1):
+                        new_end = start + (end - start)/2
+                        end = new_end.replace(microsecond=0)
+                    else:
+                        SESSION_TIMEOUT_BASE *= 2
+                        self.logger.debug(f"Doubling session timeout to {SESSION_TIMEOUT_BASE}")
                     break
-                elif err != None:
+                elif err is not None:
                     # For other errors increase the tries and half the time
                     tries += 1
-                    self.logger.debug(f"Encountered {err}. tries == {tries}/{retries}")
-                    new_end_ts = start.timestamp() + ((end.timestamp() - start.timestamp())/2)
-                    end = datetime.fromtimestamp(new_end_ts).replace(microsecond=0)
+                    self.logger.error(f"Encountered {err}. tries == {tries}/{retries}")
+                    error = err
+                    new_end = start + (end - start)/2
+                    end = new_end.replace(microsecond=0)
                     break
 
 
@@ -886,9 +926,21 @@ class M365DataDumper(DataDumper):
                     # If there are no more results within a session then break
                     # This could indicate that there an error or just that all results have been received
                     response_dict = response
+                    SESSION_TIMEOUT_BASE = SESSION_TIMEOUT_BASE_ORIG
                     if len(response_dict['value']) == 0:
-                        tries += 1
-                        self.logger.debug(f"No results in response? tries == {tries}/{retries}")
+                        if end - start > timedelta(minutes=1):
+                            tries += 1
+                            self.logger.debug(f"No results in response? tries == {tries}/{retries}")
+                            new_end = start + (end - start)/2
+                            end = new_end.replace(microsecond=0)
+                        else:
+                            self.logger.debug("No results in response and the time period is less than 1 minute")
+                            save_state(statefile, end, start=start, is_datetime=False, time_range=True)
+                            self._insert_ual_record({"start": start,
+                                   "end": end,
+                                   "count": 0,
+                                   "done_status": True}, boundsfile=boundsfile)
+                            start = end
                         break
                     if int(response_dict['value'][0]['ResultCount']) == 0:
                         tries += 1
@@ -903,8 +955,35 @@ class M365DataDumper(DataDumper):
                     # --- Duplicate detection ---
                     # The UAL API can produce duplicate results across pages, or restart
                     # sessions silently. We track unique AuditData IDs to detect both cases.
+                    # Also filter out results with null/empty AuditData or missing Id fields.
                     session_oldset = set([json.loads(result["AuditData"])["Id"] for result in session_results])
-                    session_newset = set([json.loads(result["AuditData"])["Id"] for result in response_dict['value']])
+                    session_newset = set()
+                    new_response_values = []
+                    empty_difference = 0
+                    first_log_time = end
+                    last_log_time = start
+                    for result in response_dict["value"]:
+                        if "AuditData" in result:
+                            result_data = result["AuditData"]
+                            if result_data is None or result_data == "":
+                                empty_difference += 1
+                            else:
+                                result_data = json.loads(result_data)
+                                if "Id" in result_data:
+                                    session_newset.add(result_data["Id"])
+                                    new_response_values.append(result)
+                                else:
+                                    self.logger.debug(f"Id field doesn't exist for log {json.dumps(result_data, indent=2)}")
+                                if "CreationTime" in result_data:
+                                    try:
+                                        log_creation_time = utc.localize(dateutil.parser.parse(result_data["CreationTime"]))
+                                    except ValueError:
+                                        log_creation_time = dateutil.parser.parse(result_data["CreationTime"]).astimezone(utc)
+                                    first_log_time = min(log_creation_time, first_log_time)
+                                    last_log_time = max(log_creation_time, last_log_time)
+                        else:
+                            self.logger.debug(f"AuditData field doesn't exist for log {json.dumps(result, indent=2)}")
+                    response_dict["value"] = new_response_values
                     session_set = session_oldset.union(session_newset)
                     old_duplicates = abs(len(session_results) - len(session_oldset))
                     new_duplicates = abs(sessionCount - len(session_newset))
@@ -932,7 +1011,7 @@ class M365DataDumper(DataDumper):
                     self.logger.debug(f"{response_len} records returned from response")
                     concat_len = len(session_results) + response_len
                     if (concat_len == sessionCount \
-                       or (response_len == resultSize and concat_len <= sessionCount)) \
+                       or (response_len == resultSize - empty_difference and concat_len <= sessionCount)) \
                        and (response_start >= start and response_end <= end):
                         # return results are correct
                         session_results += response_dict['value']
@@ -950,7 +1029,7 @@ class M365DataDumper(DataDumper):
                             response_len = len(cache_entry["results"])
                             concat_len = len(session_results) + response_len
                             if (concat_len == sessionCount \
-                               or (response_len == resultSize and concat_len <= sessionCount)) \
+                               or (response_len == resultSize - empty_difference and concat_len <= sessionCount)) \
                                and cache_entry["start"] >= start and cache_entry["end"] <= end:
                                 self.logger.debug("Cache entry found")
                                 session_results += cache_entry['results']
@@ -1011,6 +1090,14 @@ class M365DataDumper(DataDumper):
             # from the session
             if status_code == 200 and len(session_results) == sessionCount:
                 response_count += len(session_results)
+
+                # If we are at the very end (close to present time), logs may not have
+                # been generated yet. Use the latest actual log time instead of the
+                # queried end time to avoid claiming we've covered a range with no logs.
+                saved_end = end
+                if end == finalEnd:
+                    end = last_log_time
+
                 # save output for current session
                 if len(session_results) > 0:
                     session_filename = f"ual_{startDate}_{endDate}.json".replace(":", "_")
@@ -1030,11 +1117,13 @@ class M365DataDumper(DataDumper):
                 data_saved = True
 
                 self.total_ual_logs_saved += len(session_results)
+                self.get_ual_dumper_stats(statefile=statefile)
                 elapsed_time = time.perf_counter() - self.ual_seconds
-                rate = int(self.total_ual_logs_saved / elapsed_time * 60 * 60)
+                rate = int(self.total_ual_logs_saved / max(elapsed_time, 1) * 60 * 60)
                 self.logger.info(f"Saved {len(session_results)} logs. Current rate is {rate} logs/hours")
                 if ual_progress and ual_progress.get("bar"):
                     ual_progress["bar"].set_postfix_str(f"{self.total_ual_logs_saved} logs | {rate} logs/hr")
+                end = saved_end
 
             if new_task_created or data_saved:
                 start = end
@@ -1043,6 +1132,10 @@ class M365DataDumper(DataDumper):
                 #self.logger.debug(f"start/end before bounds {start}/{end}")
                 end,_ = self.find_bounds_end_size(start, end)
                 #self.logger.debug(f"start/end after bounds {start}/{end}")
+
+        if tries >= retries:
+            self.logger.error(error)
+            raise ValueError(error)
 
         if not isolated:
             await asyncio.gather(*self.ual_tasks)
@@ -1122,6 +1215,17 @@ class M365DataDumper(DataDumper):
 
         self.total_ual_logs_saved = 0
         self.ual_seconds = time.perf_counter()
+        self.ual_dumper_start = datetime.now(timezone.utc)
+
+        # Calculate stats for incremental progress tracking
+        self.initial_total_time_saved = 0
+        for time_range in finished_time_ranges:
+            self.initial_total_time_saved += (time_range["end"] - time_range["start"]).total_seconds()
+
+        self.total_time_to_be_pulled = 0
+        for record in search_time_ranges:
+            self.total_time_to_be_pulled += (record["end"] - record["start"]).total_seconds()
+        self.total_time_to_be_pulled = max(self.total_time_to_be_pulled, 1)
 
         # Calculate total hours across all time ranges for the progress bar
         range_hours_list = []

@@ -72,6 +72,10 @@ async def run(args, config, auth, init_sections, auth_un_pw=None):
     msft_security_center_auth = auth["app_auth"]["securitycenter_api"]
     loganalytics_app_auth = auth["app_auth"]["log_analytics_api"]
     msft_security_auth = auth["app_auth"]["security_api"]
+    try:
+        cloudapp_defender_auth = auth["app_auth"]["cloudapp_defender"]
+    except KeyError:
+        cloudapp_defender_auth = {}
 
     # TokenManager monitors token expiry and refreshes proactively (5 min before expiry)
     gcc = config_get(config, 'config', 'gcc', logger)
@@ -104,7 +108,7 @@ async def run(args, config, auth, init_sections, auth_un_pw=None):
             azure = True
         if 'mde' in init_sections:
             portal_auth = auth.get('portal_auth')
-            mdedumper = MDEDataDumper(args.output_dir, args.reports_dir, msft_security_center_auth, msft_security_auth, maindumper.ahsession, config, args.debug, token_manager=token_manager, portal_auth=portal_auth, force_repull=force_repull)
+            mdedumper = MDEDataDumper(args.output_dir, args.reports_dir, msft_security_center_auth, msft_security_auth, msft_graph_app_auth, cloudapp_defender_auth, maindumper.ahsession, config, args.debug, token_manager=token_manager, portal_auth=portal_auth, force_repull=force_repull)
             mde = True
 
     progress_file = os.path.join(args.output_dir, '.progress.json')

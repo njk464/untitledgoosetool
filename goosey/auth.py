@@ -66,7 +66,10 @@ class Authentication():
         for key in self.endpoints_dict.keys():
             if key in ["blob_api", "authority_api"]:
                 continue
-            app_resource_uris[key] = self.endpoints_dict[key] + "/.default"
+            if key == "cloudapp_defender":
+                app_resource_uris[key] = "05a65629-4c1b-48c1-a78b-804c4abdd4af/.default"
+            else:
+                app_resource_uris[key] = self.endpoints_dict[key] + "/.default"
         return app_resource_uris
 
     def authenticate_as_app(self, resource_uri):

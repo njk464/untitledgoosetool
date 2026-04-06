@@ -15,7 +15,7 @@ Two auth tokens are used:
   (api/advancedhunting), used for AlertInfo/AlertEvidence and Identity tables.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import itertools
 from goosey.datadumper import DataDumper
 from goosey.progress import get_progress_manager
@@ -35,18 +35,21 @@ class MDEDataDumper(DataDumper):
     - 'machine': Queries each table per-machine, creating separate output dirs per device.
     """
 
-    def __init__(self, output_dir, reports_dir, app_auth, app_auth2, session, config, debug, token_manager=None, portal_auth=None, force_repull=False):
+    def __init__(self, output_dir, reports_dir, app_auth, app_auth2, app_auth3, app_auth4, session, config, debug, token_manager=None, portal_auth=None, force_repull=False):
         super().__init__(f'{output_dir}{os.path.sep}mde', reports_dir, app_auth, session, debug, token_manager=token_manager, endpoint_key="securitycenter_api", force_repull=force_repull)
         self.app_auth2 = app_auth2  # security_api token for M365 Defender advanced hunting
+        self.app_auth3 = app_auth3  # graph_api token for Graph-based hunting queries
+        self.app_auth4 = app_auth4  # cloudapp_defender token for Cloud App Security API
         self.portal_auth = portal_auth  # Optional portal session cookies for timeline APIs
         self.failurefile = os.path.join(reports_dir, '_no_results.json')
         self.logger = setup_logger(__name__, debug)
         self.gcc = config_get(config, 'config', 'gcc', self.logger).lower() == "true"
         self.gcc_high = config_get(config, 'config', 'gcc_high', self.logger).lower() == "true"
-        endpoints = get_endpoints(gcc=self.gcc, gcc_high=self.gcc_high)
-        self.mde_url = endpoints["securitycenter_api"] + "/"
-        self.identity_url = endpoints["security_api"]
+        self.endpoints = get_endpoints(gcc=self.gcc, gcc_high=self.gcc_high)
+        self.mde_url = self.endpoints["securitycenter_api"] + "/"
+        self.identity_url = self.endpoints["security_api"]
         self.call_object = [self.mde_url, self.app_auth, self.logger, self.output_dir, self.get_session()]
+        self.graph_call_object = [self.endpoints["graph_api"] + "/v1.0/", self.app_auth3, self.logger, self.output_dir, self.get_session()]
         self.threshold = int(config_get(config, 'variables', 'mde_threshold'))
         self.mde_query_mode = config_get(config, 'variables', 'mde_query_mode')
         self.date_range, self.date_start, self.date_end = get_date_range(config, self.logger)
@@ -170,6 +173,157 @@ class MDEDataDumper(DataDumper):
             return
         await helper_single_object("api/machineactions", self.call_object, self.failurefile)
         self.write_savestate("machine_actions")
+
+    async def dump_cloudappactivity(self) -> None:
+        """Dump Microsoft Defender for Cloud App activity logs.
+
+        Uses the Cloud App Security API to collect activity logs, supporting both
+        current (last 30 days) and archived (up to 6 months) endpoints.
+        https://learn.microsoft.com/en-us/defender-cloud-apps/api-activities-list
+        """
+        caa_output_dir = os.path.join(self.output_dir, "cloud_app_activity")
+        statefile = os.path.join(caa_output_dir, ".caa_savestate")
+        check_output_dir(caa_output_dir, self.logger)
+        app_auth = self.app_auth4
+        err = None
+        header = {
+            'Authorization': '%s %s' % (app_auth.get('token_type', ''), app_auth.get('access_token', '')),
+            'Content-Type': 'application/json'
+        }
+        if not app_auth.get('access_token'):
+            self.logger.warning("No cloudapp_defender auth token available, skipping cloud app activity dump")
+            return
+        unique_ids = set()
+
+        # default end time. Now
+        default_end = datetime.now(timezone.utc)
+
+        # default start time
+        default_start = (default_end - timedelta(days=31*6))
+
+        if self.date_range:
+            default_start = self.date_start
+            default_end = self.date_end
+
+        saved_end = load_state(statefile)
+        if saved_end:
+            default_start = saved_end
+
+        # By default Cloud app activity log can only search 30 days back
+        # If searching more than that (up to 6 months) then we need to use the archived endpoint
+        # which supports less filtering options and is slower
+        unarchived_end = (default_end - timedelta(days=30))
+        archived = False
+        url = self.endpoints["cloudapp_defender"] + "/api/v1/activities/"
+        if default_start < unarchived_end:
+            archived = True
+            url = self.endpoints["cloudapp_defender"] + "/api/v1/archived_activities/"
+            self.logger.debug("Using Archived endpoint")
+        # Filters need to be in epoch time
+        start = default_start.timestamp() * 1000
+        orig_start = start
+        last_date = start
+        end = default_end.timestamp() * 1000
+        self.logger.debug(f"Dumping cloud app activity logs from {default_start} to {default_end}")
+        # Total Count is not accurate. Changes on each pull. Is more of an estimate
+        tries = 0
+        retries = 3
+        while last_date < end and tries < retries and err is None:
+            total_count = 0
+            skip = 0
+            has_data = True
+            start = last_date
+            filters = {
+                "date": {
+                    "range": [{"start": start, "end": end}]
+                }
+            }
+            prev_percent_done = 0.0
+            while has_data and tries < retries:
+                data = json.dumps({"isScan": True, "sortField": "date", "sortDirection": "asc", "limit": 5000, "filters": filters})
+                if archived:
+                    data = json.dumps({"skip": skip, "sortField": "date", "sortDirection": "asc", "filters": filters})
+                try:
+                    async with self.ahsession.request("POST", url=url, headers=header, data=data) as r:
+                        result = await r.json()
+                        if r.status == 401:
+                            self.logger.error("Detected 401 unauthorized for cloud app activity.")
+                            return
+                        elif r.status == 403:
+                            err = "Insufficient role based permissions"
+                            self.logger.error(err)
+                            return err
+                        elif r.status == 429:
+                            error = result['error']
+                            message = error['message']
+                            seconds = message.split(' ')[-2]
+                            self.logger.debug("Sleeping for %s seconds" % (seconds))
+                            await asyncio.sleep(int(seconds))
+                            err = message
+                            tries += 1
+                            result = None
+                        elif r.status == 200:
+                            tries = 0
+                            has_data = result["hasNext"]
+                            if has_data and "nextQueryFilters" in result.keys():
+                                filters = result["nextQueryFilters"]
+                            skip += len(result["data"])
+                            # Handle weird edge case where the total amount of data does not match what was pulled
+                            # The endpoint is acting buggy. Current fix is to adjust by 1 ms to prevent errors
+                            first_date = end
+                            if len(result["data"]) > 0:
+                                first_date = result["data"][0]["timestamp"]
+                                last_date = result["data"][0]["timestamp"]
+                            for log in result["data"]:
+                                if log["timestamp"] < first_date:
+                                    first_date = log["timestamp"]
+                                if log["timestamp"] > last_date:
+                                    last_date = log["timestamp"]
+                                unique_ids.add(log["_id"])
+                            self.logger.debug(f"Total Logs pulled {skip}")
+                            percent_done = ((last_date - orig_start) / (end - orig_start)) * 100
+                            if percent_done == prev_percent_done and not archived and result["total"] > 0:
+                                filters["date"]["gte"] += 100
+                                filters["date"]["range"][0]["start"] = filters["date"]["gte"]
+                                has_data = True
+                                self.logger.debug(f'New start {filters["date"]["gte"]}')
+                                self.logger.debug("Got to a weird state. Adjusting time by 1 ms to fix")
+                            prev_percent_done = percent_done
+                            self.logger.debug(f"{percent_done}% Done")
+                            cur_end = utc.localize(datetime.utcfromtimestamp(last_date/1000))
+                            cur_start = utc.localize(datetime.utcfromtimestamp(first_date/1000))
+                            # Create the outfile
+                            startDate = cur_start.strftime("%Y-%m-%dT%H_%M_%S")
+                            endDate = cur_end.strftime("%Y-%m-%dT%H_%M_%S")
+                            session_filename = f"cloudappactivity_{startDate}_{endDate}.json"
+                            output_file = os.path.join(caa_output_dir, session_filename)
+                            with open(output_file, 'a', encoding='utf-8') as f:
+                                for x in result["data"]:
+                                    f.write(json.dumps(x) + '\n')
+                            if len(result["data"]) > 0:
+                                self.logger.debug(f"Saving State {cur_end}")
+                                save_state(statefile, cur_end)
+                        else:
+                            self.logger.debug(result)
+                            if "error" in result:
+                                err = result["error"]["message"]
+                                self.logger.error(err)
+                            else:
+                                self.logger.debug(result)
+                except Exception as e:
+                    self.logger.error(e, exc_info=True)
+                    tries += 1
+                    continue
+            if total_count == 0:
+                break
+        if tries >= retries:
+            return err
+
+    async def dump_graph_incidents(self) -> None:
+        """Dump Microsoft Defender incidents via Graph API.
+        https://learn.microsoft.com/en-us/graph/api/security-list-incidents
+        """
+        await helper_single_object("security/incidents?$expand=alerts", self.graph_call_object, self.failurefile)
 
     async def check_machines(self):
         self.ensure_token()
@@ -444,6 +598,258 @@ class MDEDataDumper(DataDumper):
         if pm:
             pm.complete_task(bar_name)
     dump_advanced_identity_hunting_query._manages_own_progress = True
+
+    async def dump_advanced_hunting_cloud_apps(self) -> None:
+        """Dumps results from Microsoft Defender for Cloud Apps tables via Graph API.
+
+        Queries CloudAppEvents, CloudAuditEvents, CloudProcessEvents, BehaviorEntities,
+        BehaviorInfo tables using the Graph Security runHuntingQuery endpoint.
+        API Reference: https://learn.microsoft.com/en-us/defender-xdr/advanced-hunting-schema-tables
+        """
+        tables = ['CloudAppEvents', 'CloudAuditEvents', 'CloudProcessEvents', 'BehaviorEntities', 'BehaviorInfo']
+        await self._dump_graph_tables_helper(tables=tables)
+
+    async def dump_advanced_hunting_email_url(self) -> None:
+        """Dumps results from Microsoft XDR email and URL click event tables via Graph API.
+        API Reference: https://learn.microsoft.com/en-us/defender-xdr/advanced-hunting-schema-tables
+        """
+        tables = ['EmailAttachmentInfo', 'EmailEvents', 'EmailPostDeliveryEvents', 'EmailUrlInfo', 'UrlClickEvents']
+        await self._dump_graph_tables_helper(tables=tables)
+
+    async def dump_advanced_vulnerability_management(self) -> None:
+        """Dumps results from Microsoft Defender vulnerability management tables via Graph API.
+        API Reference: https://learn.microsoft.com/en-us/defender-xdr/advanced-hunting-schema-tables
+        """
+        tables = [
+            'DeviceBaselineComplianceAssessment', 'DeviceBaselineComplianceAssessmentKB',
+            'DeviceBaselineComplianceProfiles', 'DeviceTvmBrowserExtensions',
+            'DeviceTvmBrowserExtensionsKB', 'DeviceTvmCertificateInfo',
+            'DeviceTvmHardwareFirmware', 'DeviceTvmInfoGathering',
+            'DeviceTvmInfoGatheringKB', 'DeviceTvmSecureConfigurationAssessment',
+            'DeviceTvmSecureConfigurationAssessmentKB', 'DeviceTvmSoftwareEvidenceBeta',
+            'DeviceTvmSoftwareInventory', 'DeviceTvmSoftwareVulnerabilities',
+            'DeviceTvmSoftwareVulnerabilitiesKB'
+        ]
+        await self._dump_graph_tables_helper(tables=tables)
+
+    async def dump_advanced_hunting_exposure(self) -> None:
+        """Dumps results from Microsoft Security Exposure Management tables via Graph API.
+        API Reference: https://learn.microsoft.com/en-us/defender-xdr/advanced-hunting-schema-tables
+        """
+        tables = ['ExposureGraphEdges', 'ExposureGraphNodes']
+        await self._dump_graph_tables_helper(tables=tables)
+
+    async def dump_advanced_hunting_devices_graph(self) -> None:
+        """Dumps device telemetry tables via Graph API runHuntingQuery endpoint.
+        API Reference: https://learn.microsoft.com/en-us/defender-xdr/advanced-hunting-schema-tables
+        """
+        tables = [
+            'DeviceEvents', 'DeviceFileCertificateInfo', 'DeviceLogonEvents',
+            'DeviceRegistryEvents', 'DeviceProcessEvents', 'DeviceNetworkEvents',
+            'DeviceFileEvents', 'DeviceImageLoadEvents', 'DeviceInfo', 'DeviceNetworkInfo'
+        ]
+        await self._dump_graph_tables_helper(tables=tables)
+
+    async def dump_advanced_hunting_identity_graph(self) -> None:
+        """Dumps identity tables via Graph API runHuntingQuery endpoint.
+        API Reference: https://learn.microsoft.com/en-us/defender-xdr/advanced-hunting-schema-tables
+        """
+        tables = [
+            'IdentityDirectoryEvents', 'IdentityLogonEvents', 'IdentityQueryEvents',
+            'IdentityInfo', 'AADSignInEventsBeta', 'AADSpnSignInEventsBeta'
+        ]
+        await self._dump_graph_tables_helper(tables=tables)
+
+    async def _dump_graph_tables_helper(self, tables=[]) -> None:
+        """Helper for dumping tables via Graph Security runHuntingQuery endpoint."""
+        default_end = datetime.now(timezone.utc)
+        default_start = default_end - timedelta(days=364)
+
+        if self.date_range:
+            self.logger.debug(f'Graph hunt using specified date range: {self.date_start} to {self.date_end}')
+            default_start = self.date_start
+            default_end = self.date_end
+
+        tasks = []
+        for table in tables:
+            start = default_start
+            end = default_end
+            mde_log_dir = os.path.join(self.output_dir, table)
+            base_query = table
+            check_output_dir(mde_log_dir, self.logger)
+            statefile = os.path.join(mde_log_dir, f".{table}.savestate")
+            outfile_start = os.path.join(mde_log_dir, f"{table}_")
+            saved_end = load_state(statefile)
+            if saved_end:
+                start = max(saved_end, start)
+            self.logger.debug(f"Generating graph table dump task for table: {table}, start: {start}, end: {end}")
+            caller_name = asyncio.current_task().get_name()
+            tasks.append(asyncio.create_task(
+                self._dump_graph_table(base_query, start, end, statefile=statefile, outfile_start=outfile_start),
+                name=f"{caller_name}_{table}"))
+        await asyncio.gather(*tasks)
+
+    async def run_graph_hunting_query(self, query, start, end, bounds, summarize=False):
+        """Execute a KQL query via the Graph Security runHuntingQuery endpoint.
+
+        Uses app_auth3 (graph_api token) to query the unified Graph Security API.
+        This is separate from run_mde_query which uses MDE/security_api tokens.
+        """
+        sleep_errors = ["Server disconnected", "Cannot connect", "WinError 10054"]
+        slice_errors = ['exceeded the allowed limits', 'exceeded the allowed result size']
+
+        app_auth = self.app_auth3
+        header = {
+            'Authorization': '%s %s' % (app_auth['token_type'], app_auth['access_token']),
+            'Content-Type': 'application/json'
+        }
+        full_query = query
+        if start and not end:
+            full_query += f"|where Timestamp > datetime({start})"
+        elif end and not start:
+            full_query += f"|where Timestamp < datetime({end})"
+        elif end and start:
+            full_query += f"|where Timestamp between(datetime({start})..datetime({end}))"
+
+        if summarize:
+            full_query += f"| summarize Count=count(), FirstEvent=min(Timestamp), LastEvent=max(Timestamp)"
+
+        self.logger.debug(full_query)
+        payload = {"Query": full_query}
+        data = json.dumps(payload)
+        result = None
+        err = None
+        url = self.endpoints["graph_api"] + "/v1.0/security/runHuntingQuery"
+        try:
+            async with self.ahsession.request("POST", url=url, headers=header, data=data) as r:
+                result = await r.json()
+                if r.status == 401:
+                    self.logger.error("Detected 401 unauthorized for Graph hunting query.")
+                    err = "Unauthorized (401)"
+                    result = None
+                elif r.status == 429:
+                    error = result['error']
+                    message = error['message']
+                    seconds = message.split(' ')[-2]
+                    self.logger.debug("Sleeping for %s seconds" % (seconds))
+                    await asyncio.sleep(int(seconds))
+                    err = message
+                    result = None
+                else:
+                    if "error" in result:
+                        err = result["error"]["message"]
+                    if "results" in result:
+                        result = result["results"]
+                    else:
+                        result = None
+        except Exception as e:
+            self.logger.error('Error on retrieval: {}'.format(str(e)))
+            err = str(e)
+
+        count = None
+        done_status = False
+        if summarize and result:
+            count = result[0]["Count"]
+        elif result:
+            count = len(result)
+        if count is not None:
+            done_status = count < self.threshold
+        bounds = insert_bounds_record({"count": count,
+                  "start": start,
+                  "end": end,
+                  "done_status": done_status}, bounds)
+
+        if err:
+            self.logger.debug(err)
+        if err is TimeoutError or \
+           err and any(e in err for e in slice_errors) or \
+           (count and count >= self.threshold):
+           new_end_ts = start.timestamp() + ((end.timestamp() - start.timestamp())/2)
+           end = datetime.fromtimestamp(new_end_ts, utc)
+        elif err and any(e in err for e in sleep_errors):
+            await asyncio.sleep(60)
+
+        return result, err, end, bounds
+
+    async def _dump_graph_table(self, base_query, start, end, statefile, outfile_start, retries=3):
+        """Query a table via Graph runHuntingQuery and pull logs for the timeframe."""
+        totalResultCount = 0
+        totalResultEnd = start
+        totalSavedResults = 0
+        origStart = start
+        finalEnd = end
+        tries = 0
+        final_record = {"count": None, "start": end, "end": end + timedelta(1000), "done_status": False}
+        bounds = [final_record]
+
+        # initial query loop to set a baseline
+        while start < finalEnd and tries < retries*2:
+            summary, err, new_end, bounds = await self.run_graph_hunting_query(base_query, start, end, bounds, summarize=True)
+            if err:
+                tries += 1
+            elif summary is not None and summary[0]["Count"] == 0:
+                tries = 0
+                if origStart == start and finalEnd == end:
+                    self.logger.debug(f"No logs for {base_query} from {start} to {end}")
+                    save_state(statefile, end)
+                    return
+                start = end
+                end = finalEnd
+                bounds = [final_record]
+                continue
+            elif summary is not None and summary[0]["Count"] > 0:
+                tries = 0
+                totalResultCount = summary[0]["Count"]
+                totalResultEnd = end
+                start = dateutil.parser.parse(summary[0]["FirstEvent"])
+                bounds[0]["start"] = start
+                break
+            end = new_end
+
+        while start < finalEnd and tries < retries:
+            startDate = start.strftime("%Y-%m-%dT%H:%M:%S")
+            endDate = end.strftime("%Y-%m-%dT%H:%M:%S")
+            bound = f'[{startDate} - {endDate}]'
+
+            if bounds[0]["count"] is None or \
+               (bounds[0]["count"] >= self.threshold and end <= bounds[0]["end"]):
+                summary, err, end, bounds = await self.run_graph_hunting_query(base_query, start, end, bounds, summarize=True)
+                if err:
+                    tries += 1
+                    continue
+                tries = 0
+                if summary[0]["Count"] >= self.threshold:
+                    continue
+                if summary[0]["Count"] == 0:
+                    end = bounds[0]["end"]
+                    start = bounds[0]["start"]
+                    continue
+
+            results, err, end, bounds = await self.run_graph_hunting_query(base_query, start, end, bounds)
+            if err:
+                tries += 1
+                continue
+            if len(results) >= 0:
+                if start >= totalResultEnd:
+                    totalResultCount += len(results)
+                self.logger.debug('Size of table: %s' % len(results))
+                session_filename = outfile_start + f"{startDate}_{endDate}.json".replace(":", "_")
+                with open(session_filename, 'a', encoding='utf-8') as f:
+                    for x in results:
+                        f.write(json.dumps(x) + '\n')
+
+                save_state(statefile, end)
+
+                tries = 0
+                end = bounds[0]["end"]
+                start = bounds[0]["start"]
+                if bounds[0]["count"] is not None and bounds[0]["count"] >= self.threshold:
+                    new_end_ts = start.timestamp() + ((end.timestamp() - start.timestamp())/2)
+                    end = datetime.fromtimestamp(new_end_ts, utc)
+
+                totalSavedResults += len(results)
+                self.logger.debug(f"Total results {totalSavedResults}/{totalResultCount}")
+                continue
 
     async def run_mde_query(self, query, start, end, bounds, path='api/advancedqueries/run', summarize=False):
         """Execute a KQL query against MDE's advanced hunting API.
