@@ -200,10 +200,12 @@ def get_endpoints(gcc=False, gcc_high=False):
     urls_dict["securitycenter_api"] = "https://api.securitycenter.windows.com"
     urls_dict["security_api"] = "https://api.security.microsoft.com"
     urls_dict["authority_api"] = "https://login.microsoftonline.com"
+    urls_dict["cloudapp_defender"] = "https://portal.cloudappsecurity.com"
     # If using a gcc tenant
     if gcc:
         urls_dict["securitycenter_api"] = "https://api-gcc.securitycenter.microsoft.us"
         urls_dict["security_api"] = "https://api-gcc.security.microsoft.us"
+        urls_dict["cloudapp_defender"] = "https://portal.cloudappsecuritygov.com"
     # If using a gcc high tenant
     elif gcc_high:
         urls_dict["outlook_office_api"] = "https://outlook.office365.us"
@@ -214,6 +216,7 @@ def get_endpoints(gcc=False, gcc_high=False):
         urls_dict["securitycenter_api"] = "https://api-gov.securitycenter.microsoft.us"
         urls_dict["security_api"] = "https://api-gov.security.microsoft.us"
         urls_dict["authority_api"] = "https://login.microsoftonline.us"
+        urls_dict["cloudapp_defender"] = "https://portal.cloudappsecuritygov.com"
     return urls_dict
 
 def dict2obj(d):
