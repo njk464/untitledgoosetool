@@ -107,24 +107,36 @@ WindowsDefenderATP:
 - Vulnerability.Read.All (Application)
 
 Microsoft Graph:
+- AdministrativeUnit.Read.All (Application)
 - APIConnectors.Read.All (Application)
 - AuditLog.Read.All (Application)
 - ConsentRequest.Read.All (Application)
 - Directory.Read.All (Application)
 - Domain.Read.All (Application)
+- ExternalUserProfile.Read.All (Application)
+- Group.Read.All (Application)
 - IdentityProvider.Read.All (Application)
 - IdentityRiskEvent.Read.All (Application)
 - IdentityRiskyServicePrincipal.Read.All (Application)
 - IdentityRiskyUser.Read.All (Application)
 - MailboxSettings.Read (Application)
+- PendingExternalUserProfile.Read.All (Application)
 - Policy.Read.All (Application)
 - Policy.Read.PermissionGrant (Application)
 - Reports.Read.All (Application)
+- ResourceSpecificPermissionGrant.ReadForUser.All (Application)
 - RoleManagement.Read.All (Application)
 - SecurityActions.Read.All (Application)
 - SecurityAlert.Read.All (Application)
 - SecurityEvents.Read.All (Application)
+- Team.ReadBasic.All (Application)
+- TeamsAppInstallation.ReadForUser.All (Application)
+- ThreatHunting.Read.All (Application)
+- User.Read.All (Application)
 - UserAuthenticationMethod.Read.All (Application)
+
+Microsoft Cloud App Security:
+- investigation.read (Application)
 
 Office 365 Exchange Online
 - Exchange.ManageAsApp (Application)

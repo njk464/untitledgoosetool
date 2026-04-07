@@ -87,5 +87,6 @@ Auth tokens are stored in a `.auth` JSON file keyed by API endpoint type:
 - `app_auth.resource_manager` — Azure Resource Manager
 - `app_auth.securitycenter_api` — Microsoft Security Center
 - `app_auth.log_analytics_api` — Log Analytics
+- `app_auth.cloudapp_defender` — Microsoft Cloud App Security (Defender for Cloud Apps)
 
 Each datadumper receives only the token(s) it needs at instantiation time in `honk.py`.
