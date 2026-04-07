@@ -1136,6 +1136,54 @@ def api_progress():
         return jsonify({})
 
 
+@app.route("/api/portal-cookie", methods=["POST"])
+def api_portal_cookie():
+    """Save and validate an ESTS cookie for MDE portal auth.
+
+    Writes the cookie to the .auth file, then validates it by hitting
+    security.microsoft.com and checking for an sccauth cookie in the response.
+    """
+    import requests as req_lib
+
+    data = request.json
+    ests_cookie = data.get("ests_cookie", "").strip()
+    if not ests_cookie:
+        return jsonify({"saved": False, "valid": False, "error": "No cookie provided"})
+
+    # Save to .auth file
+    auth_path = os.path.join(get_working_dir(), ".auth")
+    auth_cfg = configparser.ConfigParser()
+    if os.path.isfile(auth_path):
+        auth_cfg.read(auth_path)
+    if not auth_cfg.has_section("auth"):
+        auth_cfg.add_section("auth")
+    auth_cfg.set("auth", "ests_cookie", ests_cookie)
+    with open(auth_path, "w") as f:
+        auth_cfg.write(f)
+
+    # Validate by hitting the portal
+    try:
+        session = req_lib.Session()
+        session.cookies.set('ESTSAUTHPERSISTENT', ests_cookie, domain='.microsoft.com')
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        })
+        resp = session.get('https://security.microsoft.com', allow_redirects=True, timeout=30)
+        sccauth = session.cookies.get('sccauth', domain='security.microsoft.com')
+        if not sccauth:
+            for cookie in session.cookies:
+                if cookie.name == 'sccauth':
+                    sccauth = cookie.value
+                    break
+        if sccauth:
+            return jsonify({"saved": True, "valid": True})
+        else:
+            return jsonify({"saved": True, "valid": False,
+                          "error": "Cookie saved but could not obtain portal session. Cookie may be expired."})
+    except Exception as e:
+        return jsonify({"saved": True, "valid": False, "error": str(e)})
+
+
 @app.route("/api/run", methods=["POST"])
 def api_run():
     data = request.json
