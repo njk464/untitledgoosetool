@@ -443,6 +443,47 @@
               </div>
             </div>
           </div>
+
+          <!-- Portal Auth (ESTS Cookie) -->
+          <div class="card mb-3">
+            <div class="card-header"><h6 class="mb-0">MDE Portal Auth (ESTS Cookie)</h6></div>
+            <div class="card-body">
+              <p class="small">MDE device and identity timeline collection requires a portal session cookie. Follow these steps to grab it automatically:</p>
+
+              <div class="mb-3">
+                <h6>Step 1: Log into the Security Portal</h6>
+                <button class="btn btn-sm btn-outline-primary" onclick="window.open('https://security.microsoft.com', '_blank')">
+                  Open security.microsoft.com
+                </button>
+                <span class="small text-muted ms-2">Log in with your admin account and wait for the dashboard to load.</span>
+              </div>
+
+              <div class="mb-3">
+                <h6>Step 2: Copy the ESTS Cookie</h6>
+                <p class="small mb-2">After logging in, open the browser console (<kbd>F12</kbd> &rarr; Console tab) in the security.microsoft.com tab and paste this command:</p>
+                <div class="input-group input-group-sm mb-2">
+                  <input type="text" class="form-control font-monospace" id="ests-snippet" readonly
+                    value="copy(document.cookie.split(';').map(c=>c.trim()).find(c=>c.startsWith('ESTSAUTHPERSISTENT=')).split('=').slice(1).join('='))">
+                  <button class="btn btn-outline-secondary" onclick="navigator.clipboard.writeText(document.getElementById('ests-snippet').value); this.textContent='Copied!'; setTimeout(()=>this.textContent='Copy Snippet',1500)">Copy Snippet</button>
+                </div>
+                <p class="small text-muted">This copies the ESTS cookie value to your clipboard. If it says <code>undefined</code>, make sure you're logged in and the page has fully loaded.</p>
+              </div>
+
+              <div class="mb-3">
+                <h6>Step 3: Paste & Save</h6>
+                <div class="input-group input-group-sm">
+                  <input type="password" class="form-control" id="ests-cookie-input" placeholder="Paste the ESTS cookie value here">
+                  <button class="btn btn-outline-secondary" onclick="document.getElementById('ests-cookie-input').type = document.getElementById('ests-cookie-input').type === 'password' ? 'text' : 'password'">Show/Hide</button>
+                  <button class="btn btn-goose" id="ests-save-btn" onclick="saveEstsCookie()">Save & Validate</button>
+                </div>
+                <div id="ests-status" class="small mt-2"></div>
+              </div>
+
+              <div class="alert alert-secondary small mb-0">
+                <strong>Note:</strong> ESTS cookies expire after ~24 hours. You'll need to repeat this process for long-running collections. The cookie is only needed for <code>machine_timeline</code> and <code>identity_timeline</code> &mdash; all other MDE data uses the service principal.
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -940,6 +981,45 @@ function saveConf() {
     document.getElementById('conf-status').textContent = 'Saved!';
     document.getElementById('conf-status').style.color = '#64ffda';
     setTimeout(() => { document.getElementById('conf-status').textContent = ''; document.getElementById('conf-status').style.color = ''; }, 2000);
+  });
+}
+
+function saveEstsCookie() {
+  const cookie = document.getElementById('ests-cookie-input').value.trim();
+  const statusEl = document.getElementById('ests-status');
+  const btn = document.getElementById('ests-save-btn');
+  if (!cookie) {
+    statusEl.innerHTML = '<span class="text-warning">Please paste the ESTS cookie value first.</span>';
+    return;
+  }
+  btn.disabled = true;
+  btn.textContent = 'Validating...';
+  statusEl.innerHTML = '<span class="text-muted">Saving and validating cookie...</span>';
+
+  fetch('/api/portal-cookie', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ests_cookie: cookie})
+  })
+  .then(r => r.json())
+  .then(data => {
+    btn.disabled = false;
+    btn.textContent = 'Save & Validate';
+    if (data.valid) {
+      statusEl.innerHTML = '<span class="text-success">Cookie saved and validated! Portal session is active.</span>';
+      // Also update the ESTS cookie field in the Configure tab if it exists
+      const authField = document.querySelector('.conf-auth[data-key="ests_cookie"]');
+      if (authField) authField.value = '********';
+    } else if (data.saved) {
+      statusEl.innerHTML = '<span class="text-warning">Cookie saved but validation failed: ' + (data.error || 'Could not establish portal session') + '. The cookie may be expired.</span>';
+    } else {
+      statusEl.innerHTML = '<span class="text-danger">Error: ' + (data.error || 'Unknown error') + '</span>';
+    }
+  })
+  .catch(err => {
+    btn.disabled = false;
+    btn.textContent = 'Save & Validate';
+    statusEl.innerHTML = '<span class="text-danger">Request failed: ' + err.message + '</span>';
   });
 }
 
