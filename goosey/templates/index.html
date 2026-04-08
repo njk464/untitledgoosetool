@@ -444,43 +444,66 @@
             </div>
           </div>
 
-          <!-- Portal Auth (ESTS Cookie) -->
+          <!-- Portal Auth -->
           <div class="card mb-3">
-            <div class="card-header"><h6 class="mb-0">MDE Portal Auth (ESTS Cookie)</h6></div>
+            <div class="card-header"><h6 class="mb-0">MDE Portal Auth (Timeline Collection)</h6></div>
             <div class="card-body">
-              <p class="small">MDE device and identity timeline collection requires a portal session cookie. Follow these steps to grab it automatically:</p>
+              <p class="small">MDE device and identity timeline collection requires portal-level authentication. Use the device code login below (recommended) or manually provide an ESTS cookie.</p>
 
-              <div class="mb-3">
-                <h6>Step 1: Log into the Security Portal</h6>
-                <button class="btn btn-sm btn-outline-primary" onclick="window.open('https://security.microsoft.com', '_blank')">
-                  Open security.microsoft.com
-                </button>
-                <span class="small text-muted ms-2">Log in with your admin account and wait for the dashboard to load.</span>
+              <!-- Option 1: Device Code Flow (Recommended) -->
+              <h6>Option 1: Device Code Login (Recommended)</h6>
+              <p class="small mb-2">Log in with your admin account via device code flow. This obtains a refresh token that auto-renews during collection.</p>
+              <div class="mb-2">
+                <label class="form-label small">Tenant ID</label>
+                <input type="text" class="form-control form-control-sm" id="portal-tenant-id" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+                <span class="small text-muted">Same tenant ID as in your config. Will auto-fill from config if set.</span>
               </div>
-
               <div class="mb-3">
-                <h6>Step 2: Copy the ESTS Cookie</h6>
-                <p class="small mb-2">After logging in, open the browser console (<kbd>F12</kbd> &rarr; Console tab) in the security.microsoft.com tab and paste this command:</p>
-                <div class="input-group input-group-sm mb-2">
-                  <input type="text" class="form-control font-monospace" id="ests-snippet" readonly
-                    value="copy(document.cookie.split(';').map(c=>c.trim()).find(c=>c.startsWith('ESTSAUTHPERSISTENT=')).split('=').slice(1).join('='))">
-                  <button class="btn btn-outline-secondary" onclick="navigator.clipboard.writeText(document.getElementById('ests-snippet').value); this.textContent='Copied!'; setTimeout(()=>this.textContent='Copy Snippet',1500)">Copy Snippet</button>
+                <button class="btn btn-goose btn-sm" id="portal-login-btn" onclick="startPortalDeviceCode()">Start Portal Login</button>
+              </div>
+              <div id="portal-device-code-area" class="mb-3" style="display:none;">
+                <div class="alert alert-primary small">
+                  <p class="mb-1"><strong>To sign in:</strong></p>
+                  <ol class="mb-1">
+                    <li>Open <a id="portal-dc-link" href="#" target="_blank">https://microsoft.com/devicelogin</a> (opens in private window recommended)</li>
+                    <li>Enter this code: <strong><code id="portal-dc-code">--------</code></strong>
+                      <button class="btn btn-sm btn-outline-secondary ms-1 py-0" onclick="navigator.clipboard.writeText(document.getElementById('portal-dc-code').textContent); this.textContent='Copied!'; setTimeout(()=>this.textContent='Copy',1500)">Copy</button>
+                    </li>
+                    <li>Sign in with your admin account</li>
+                    <li>Accept the permissions prompt</li>
+                  </ol>
+                  <p class="mb-0 text-muted">Waiting for you to complete sign-in...</p>
                 </div>
-                <p class="small text-muted">This copies the ESTS cookie value to your clipboard. If it says <code>undefined</code>, make sure you're logged in and the page has fully loaded.</p>
-              </div>
-
-              <div class="mb-3">
-                <h6>Step 3: Paste & Save</h6>
-                <div class="input-group input-group-sm">
-                  <input type="password" class="form-control" id="ests-cookie-input" placeholder="Paste the ESTS cookie value here">
-                  <button class="btn btn-outline-secondary" onclick="document.getElementById('ests-cookie-input').type = document.getElementById('ests-cookie-input').type === 'password' ? 'text' : 'password'">Show/Hide</button>
-                  <button class="btn btn-goose" id="ests-save-btn" onclick="saveEstsCookie()">Save & Validate</button>
+                <div class="progress" style="height: 4px;">
+                  <div id="portal-dc-progress" class="progress-bar progress-bar-striped progress-bar-animated" style="width: 100%"></div>
                 </div>
-                <div id="ests-status" class="small mt-2"></div>
               </div>
+              <div id="portal-login-status" class="small mb-3"></div>
 
-              <div class="alert alert-secondary small mb-0">
-                <strong>Note:</strong> ESTS cookies expire after ~24 hours. You'll need to repeat this process for long-running collections. The cookie is only needed for <code>machine_timeline</code> and <code>identity_timeline</code> &mdash; all other MDE data uses the service principal.
+              <hr>
+
+              <!-- Option 2: Manual ESTS Cookie -->
+              <details>
+                <summary class="small text-muted mb-2" style="cursor:pointer">Option 2: Manual ESTS Cookie (Advanced)</summary>
+                <div class="mt-2">
+                  <p class="small">If device code login doesn't work, you can manually grab the ESTS cookie from your browser:</p>
+                  <ol class="small">
+                    <li>Open a <strong>private/incognito</strong> browser window</li>
+                    <li>Navigate to <code>security.microsoft.com</code> and log in</li>
+                    <li>When you see <strong>"Stay signed in?"</strong>, open DevTools (<kbd>F12</kbd> &rarr; Application &rarr; Cookies) and copy the <code>ESTSAUTHPERSISTENT</code> cookie value</li>
+                    <li>Paste it below and click Save</li>
+                  </ol>
+                  <div class="input-group input-group-sm">
+                    <input type="password" class="form-control" id="ests-cookie-input" placeholder="Paste ESTSAUTHPERSISTENT cookie value">
+                    <button class="btn btn-outline-secondary" onclick="document.getElementById('ests-cookie-input').type = document.getElementById('ests-cookie-input').type === 'password' ? 'text' : 'password'">Show/Hide</button>
+                    <button class="btn btn-goose" id="ests-save-btn" onclick="saveEstsCookie()">Save & Validate</button>
+                  </div>
+                  <div id="ests-status" class="small mt-2"></div>
+                </div>
+              </details>
+
+              <div class="alert alert-secondary small mt-3 mb-0">
+                <strong>Note:</strong> Portal auth is only needed for <code>machine_timeline</code> and <code>identity_timeline</code>. All other MDE data (alerts, advanced hunting, cloud app activity) uses the service principal and requires no portal auth.
               </div>
             </div>
           </div>
@@ -890,6 +913,9 @@ function loadConf() {
         const key = el.dataset.key;
         el.value = (data.auth[section] || {})[key] || '';
       });
+      // Auto-fill portal tenant ID from config
+      const tenantId = (data.conf['auth'] || {})['tenant'] || (data.auth['auth'] || {})['tenant'] || '';
+      if (tenantId) document.getElementById('portal-tenant-id').value = tenantId;
       // Render dump methods
       renderDumpMethods(data.dump_methods, data.conf);
       document.getElementById('conf-status').textContent = 'Loaded';
@@ -1019,6 +1045,89 @@ function saveEstsCookie() {
   .catch(err => {
     btn.disabled = false;
     btn.textContent = 'Save & Validate';
+    statusEl.innerHTML = '<span class="text-danger">Request failed: ' + err.message + '</span>';
+  });
+}
+
+function startPortalDeviceCode() {
+  const tenantId = (document.getElementById('portal-tenant-id').value || '').trim();
+  if (!tenantId) {
+    document.getElementById('portal-login-status').innerHTML =
+      '<span class="text-danger">Tenant ID is required.</span>';
+    return;
+  }
+
+  const btn = document.getElementById('portal-login-btn');
+  const statusEl = document.getElementById('portal-login-status');
+  const codeArea = document.getElementById('portal-device-code-area');
+
+  btn.disabled = true;
+  statusEl.innerHTML = '<span class="text-muted">Starting device code flow...</span>';
+  codeArea.style.display = 'none';
+
+  let pollTimer = null;
+
+  function stopPolling(restore) {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    if (restore) { btn.disabled = false; }
+  }
+
+  fetch('/api/portal-device-code/start', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({tenant_id: tenantId}),
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.error) {
+      statusEl.innerHTML = '<span class="text-danger">Error: ' + data.error + '</span>';
+      btn.disabled = false;
+      return;
+    }
+
+    // Show the device code UI
+    document.getElementById('portal-dc-code').textContent = data.user_code;
+    const link = document.getElementById('portal-dc-link');
+    link.href = data.verification_uri;
+    link.textContent = data.verification_uri;
+    codeArea.style.display = '';
+    statusEl.innerHTML = '<span class="text-muted">Waiting for login...</span>';
+
+    const flowId = data.flow_id;
+
+    // Poll every 5 seconds
+    pollTimer = setInterval(() => {
+      fetch('/api/portal-device-code/poll', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({flow_id: flowId}),
+      })
+      .then(r => r.json())
+      .then(result => {
+        if (result.status === 'pending') {
+          // Still waiting — keep polling
+          return;
+        }
+        stopPolling(true);
+        codeArea.style.display = 'none';
+        if (result.status === 'complete') {
+          statusEl.innerHTML = '<span class="text-success">Portal login successful. Refresh token saved.</span>';
+        } else if (result.status === 'expired') {
+          statusEl.innerHTML = '<span class="text-warning">Device code expired. Please start again.</span>';
+        } else {
+          const msg = result.error || 'Unknown error';
+          statusEl.innerHTML = '<span class="text-danger">Error: ' + msg + '</span>';
+        }
+      })
+      .catch(err => {
+        stopPolling(true);
+        codeArea.style.display = 'none';
+        statusEl.innerHTML = '<span class="text-danger">Poll request failed: ' + err.message + '</span>';
+      });
+    }, 5000);
+  })
+  .catch(err => {
+    btn.disabled = false;
     statusEl.innerHTML = '<span class="text-danger">Request failed: ' + err.message + '</span>';
   });
 }

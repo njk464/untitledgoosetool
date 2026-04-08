@@ -37,6 +37,10 @@ app = Flask(
     template_folder=os.path.join(os.path.dirname(__file__), 'templates'),
 )
 
+# Module-level storage for in-progress device code flows.
+# Keyed by flow_id (uuid4 hex); values are dicts with 'flow' and 'msal_app'.
+_device_flows = {}  # flow_id -> {flow, msal_app}
+
 
 # ---------------------------------------------------------------------------
 # Command runner: executes goosey CLI commands as subprocesses and streams output
@@ -1182,6 +1186,117 @@ def api_portal_cookie():
                           "error": "Cookie saved but could not obtain portal session. Cookie may be expired."})
     except Exception as e:
         return jsonify({"saved": True, "valid": False, "error": str(e)})
+
+
+@app.route("/api/portal-device-code/start", methods=["POST"])
+def api_portal_device_code_start():
+    """Initiate an MDE portal device-code OAuth flow.
+
+    Starts a device-code flow using MSAL for the Microsoft Security portal
+    (client_id 1fec8e78-bce4-4aaf-ab1b-5451cc387264) targeting the
+    WindowsDefenderATP scope. The returned user_code and verification_uri
+    are shown to the user who must complete login in their browser.
+
+    Request JSON:
+        tenant_id (str): Azure AD tenant ID or domain.
+
+    Returns:
+        200 JSON: {flow_id, user_code, verification_uri, expires_in, message}
+        400 JSON: {error} on missing/invalid input or MSAL failure.
+    """
+    import msal
+
+    data = request.json or {}
+    tenant_id = (data.get("tenant_id") or "").strip()
+    if not tenant_id:
+        return jsonify({"error": "tenant_id is required"}), 400
+
+    authority = f"https://login.microsoftonline.com/{tenant_id}"
+    # Client ID for the Microsoft Security portal public app registration
+    client_id = "1fec8e78-bce4-4aaf-ab1b-5451cc387264"
+    scopes = ["80ccca67-54bd-44ab-8625-4b79c4dc7775/.default", "offline_access"]
+
+    try:
+        msal_app = msal.PublicClientApplication(client_id, authority=authority)
+        flow = msal_app.initiate_device_flow(scopes=scopes)
+        if "user_code" not in flow:
+            error_msg = flow.get("error_description", flow.get("error", "Failed to initiate device flow"))
+            return jsonify({"error": error_msg}), 400
+
+        flow_id = uuid.uuid4().hex
+        _device_flows[flow_id] = {"flow": flow, "msal_app": msal_app}
+
+        return jsonify({
+            "flow_id": flow_id,
+            "user_code": flow["user_code"],
+            "verification_uri": flow["verification_uri"],
+            "expires_in": flow.get("expires_in", 900),
+            "message": flow.get("message", ""),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/portal-device-code/poll", methods=["POST"])
+def api_portal_device_code_poll():
+    """Poll for completion of an MDE portal device-code flow.
+
+    Calls MSAL's acquire_token_by_device_flow which returns immediately
+    with 'authorization_pending' if the user has not yet completed login.
+    On success, writes the refresh_token to the .auth file so the MDE
+    portal auth module can use it for subsequent requests.
+
+    Request JSON:
+        flow_id (str): Flow ID returned by /api/portal-device-code/start.
+
+    Returns:
+        200 JSON: {status} where status is one of:
+            "complete"  — user finished login; refresh_token saved to .auth
+            "pending"   — user hasn't completed login yet; poll again
+            "expired"   — device code expired; start a new flow
+            "error"     — unexpected error; {error} field contains description
+    """
+    data = request.json or {}
+    flow_id = (data.get("flow_id") or "").strip()
+    if not flow_id or flow_id not in _device_flows:
+        return jsonify({"status": "error", "error": "Unknown or expired flow_id"}), 400
+
+    entry = _device_flows[flow_id]
+    flow = entry["flow"]
+    msal_app = entry["msal_app"]
+
+    try:
+        result = msal_app.acquire_token_by_device_flow(flow)
+    except Exception as e:
+        _device_flows.pop(flow_id, None)
+        return jsonify({"status": "error", "error": str(e)})
+
+    if "access_token" in result:
+        # Success — persist the refresh token to .auth
+        refresh_token = result.get("refresh_token", "")
+        auth_path = os.path.join(get_working_dir(), ".auth")
+        auth_cfg = configparser.ConfigParser()
+        if os.path.isfile(auth_path):
+            auth_cfg.read(auth_path)
+        if not auth_cfg.has_section("auth"):
+            auth_cfg.add_section("auth")
+        if refresh_token:
+            auth_cfg.set("auth", "portal_refresh_token", refresh_token)
+        with open(auth_path, "w") as f:
+            auth_cfg.write(f)
+        _device_flows.pop(flow_id, None)
+        return jsonify({"status": "complete"})
+
+    error_code = result.get("error", "")
+    if error_code == "authorization_pending":
+        return jsonify({"status": "pending"})
+    elif error_code in ("expired_token", "code_expired"):
+        _device_flows.pop(flow_id, None)
+        return jsonify({"status": "expired"})
+    else:
+        error_desc = result.get("error_description", error_code)
+        _device_flows.pop(flow_id, None)
+        return jsonify({"status": "error", "error": error_desc})
 
 
 @app.route("/api/run", methods=["POST"])
