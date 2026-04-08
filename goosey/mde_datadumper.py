@@ -202,8 +202,8 @@ class MDEDataDumper(DataDumper):
         default_start = (default_end - timedelta(days=31*6))
 
         if self.date_range:
-            default_start = self.date_start
-            default_end = self.date_end
+            default_start = utc.localize(datetime.strptime(self.date_start, "%Y-%m-%d"))
+            default_end = utc.localize(datetime.strptime(self.date_end, "%Y-%m-%d"))
 
         saved_end = load_state(statefile)
         if saved_end:

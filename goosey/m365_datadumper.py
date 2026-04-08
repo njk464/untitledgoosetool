@@ -960,8 +960,8 @@ class M365DataDumper(DataDumper):
                     session_newset = set()
                     new_response_values = []
                     empty_difference = 0
-                    first_log_time = end
-                    last_log_time = start
+                    first_log_time = end.astimezone(timezone.utc) if end.tzinfo else utc.localize(end)
+                    last_log_time = start.astimezone(timezone.utc) if start.tzinfo else utc.localize(start)
                     for result in response_dict["value"]:
                         if "AuditData" in result:
                             result_data = result["AuditData"]
