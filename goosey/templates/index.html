@@ -688,6 +688,10 @@
 
         <!-- LEFT PANEL: search + tree -->
         <div class="col-4 browse-tree-panel">
+          <div class="mb-2 d-flex" style="gap: 4px; padding: 0 0.75rem;">
+            <button class="btn btn-sm flex-fill" id="browse-mode-sourcetype" onclick="switchBrowseMode('sourcetype')" style="background:#0f3460; color:#64ffda; font-size:0.75rem; font-weight:600; border: 1px solid #64ffda;">Sourcetype</button>
+            <button class="btn btn-sm flex-fill" id="browse-mode-folder" onclick="switchBrowseMode('folder')" style="background:#16213e; color:#8892b0; font-size:0.75rem; border: 1px solid #0f3460;">Folder</button>
+          </div>
           <div class="browse-search-wrap">
             <input type="text" class="form-control form-control-sm" id="browse-search"
               placeholder="Search sourcetypes..." oninput="browseDebouncedSearch(this.value)">
@@ -1341,6 +1345,10 @@ const browseState = {
   selectedFile: null,  // relative path string
   previewOffset: 0,    // current pagination offset for preview
   previewPath: null,   // path currently shown in preview
+  browseMode: 'sourcetype',  // 'sourcetype' or 'folder'
+  folderData: null,
+  folderLoaded: false,
+  folderLoading: false,
 };
 
 // ---- Debounce utility ----
@@ -1388,6 +1396,192 @@ function loadBrowseTree() {
       browseState.treeLoading = false;
       container.innerHTML = `<div class="browse-empty"><p class="text-danger">Failed to load tree: ${err.message}</p></div>`;
     });
+}
+
+/**
+ * Switch between 'sourcetype' and 'folder' browse modes.
+ * Updates toggle button styles, hides/shows the search box and hunting queries
+ * section, and loads the appropriate tree.
+ * @param {string} mode - 'sourcetype' or 'folder'
+ */
+function switchBrowseMode(mode) {
+  browseState.browseMode = mode;
+  // Update toggle button styles
+  const stBtn = document.getElementById('browse-mode-sourcetype');
+  const flBtn = document.getElementById('browse-mode-folder');
+  if (mode === 'sourcetype') {
+    stBtn.style.background = '#0f3460'; stBtn.style.color = '#64ffda'; stBtn.style.borderColor = '#64ffda';
+    flBtn.style.background = '#16213e'; flBtn.style.color = '#8892b0'; flBtn.style.borderColor = '#0f3460';
+    // Reset folder cache so re-entering folder mode gets a fresh scan
+    browseState.folderLoaded = false;
+    browseState.folderData = null;
+  } else {
+    flBtn.style.background = '#0f3460'; flBtn.style.color = '#64ffda'; flBtn.style.borderColor = '#64ffda';
+    stBtn.style.background = '#16213e'; stBtn.style.color = '#8892b0'; stBtn.style.borderColor = '#0f3460';
+  }
+
+  // Show/hide search (only for sourcetype mode)
+  document.querySelector('.browse-search-wrap').style.display = mode === 'sourcetype' ? '' : 'none';
+
+  // Hide hunting queries section in folder mode
+  const huntSection = document.getElementById('hunt-section');
+  if (huntSection) huntSection.style.display = mode === 'sourcetype' ? '' : 'none';
+
+  if (mode === 'sourcetype') {
+    if (browseState.treeLoaded) {
+      renderBrowseTree(browseState.treeData);
+    } else {
+      loadBrowseTree();
+    }
+  } else {
+    loadFolderTree();
+  }
+}
+
+/**
+ * Fetch the folder tree from /api/browse/folder-tree and render it.
+ * Uses browseState.folderData as a cache; call switchBrowseMode('sourcetype')
+ * first to invalidate the cache if a new collection has been run.
+ */
+function loadFolderTree() {
+  if (browseState.folderLoaded) {
+    renderFolderTree(browseState.folderData);
+    return;
+  }
+  if (browseState.folderLoading) return;
+  browseState.folderLoading = true;
+
+  const container = document.getElementById('browse-tree-container');
+  container.innerHTML = '<div class="browse-spinner-wrap"><div class="spinner-border spinner-border-sm text-secondary" role="status"></div><p class="mt-2 small">Scanning folders...</p></div>';
+
+  fetch('/api/browse/folder-tree')
+    .then(r => r.json())
+    .then(data => {
+      browseState.folderData = data;
+      browseState.folderLoaded = true;
+      browseState.folderLoading = false;
+      renderFolderTree(data);
+    })
+    .catch(err => {
+      browseState.folderLoading = false;
+      container.innerHTML = '<div class="browse-empty"><p class="text-danger">Failed to load folders: ' + escHtml(err.message) + '</p></div>';
+    });
+}
+
+/**
+ * Render the folder tree into #browse-tree-container.
+ * @param {Object} data - Response from /api/browse/folder-tree
+ */
+function renderFolderTree(data) {
+  const container = document.getElementById('browse-tree-container');
+
+  if (!data.children || data.children.length === 0) {
+    container.innerHTML = '<div class="browse-empty"><div class="be-icon">&#128194;</div><p>No collected data found.</p></div>';
+    return;
+  }
+
+  container.innerHTML = '';
+  const tree = document.createElement('div');
+  tree.className = 'folder-tree';
+
+  data.children.forEach(child => {
+    tree.appendChild(renderFolderNode(child, 0));
+  });
+
+  container.appendChild(tree);
+}
+
+/**
+ * Recursively build a DOM node for a folder tree entry.
+ * Directories render as collapsible Bootstrap collapse sections;
+ * files render as clickable rows that load the file preview.
+ * @param {Object} node - Tree node from /api/browse/folder-tree
+ * @param {number} depth - Nesting depth (0 = top level)
+ */
+function renderFolderNode(node, depth) {
+  if (node.type === 'file') {
+    const item = document.createElement('div');
+    item.className = 'browse-st-item';
+    item.style.paddingLeft = (1.5 + depth * 0.75) + 'rem';
+    item.innerHTML = '<span class="text-truncate" title="' + escHtml(node.name) + '">' + escHtml(node.name) + '</span><span class="browse-badge ms-1">' + node.size_human + '</span>';
+    item.addEventListener('click', (event) => {
+      selectFolderFile(node, event);
+    });
+    return item;
+  }
+
+  // Directory node
+  const wrap = document.createElement('div');
+  const bodyId = 'folder-body-' + node.name.replace(/[^a-zA-Z0-9]/g, '_') + '-' + depth;
+
+  const header = document.createElement('div');
+  header.className = 'browse-subtype-header';
+  header.style.paddingLeft = (0.5 + depth * 0.75) + 'rem';
+  header.setAttribute('data-bs-toggle', 'collapse');
+  header.setAttribute('data-bs-target', '#' + bodyId);
+  header.innerHTML = '<span><span class="browse-chevron open">&#9658;</span> ' + escHtml(node.name) + '</span><span class="browse-badge">' + node.file_count + '</span>';
+  header.addEventListener('click', () => {
+    const chev = header.querySelector('.browse-chevron');
+    setTimeout(() => {
+      const bodyEl = document.getElementById(bodyId);
+      chev.classList.toggle('open', bodyEl && bodyEl.classList.contains('show'));
+    }, 200);
+  });
+
+  const body = document.createElement('div');
+  body.className = 'collapse show browse-subtype-body';
+  body.id = bodyId;
+
+  (node.children || []).forEach(child => {
+    body.appendChild(renderFolderNode(child, depth + 1));
+  });
+
+  wrap.appendChild(header);
+  wrap.appendChild(body);
+  return wrap;
+}
+
+/**
+ * Select a file from the folder tree view, showing its metadata and loading
+ * the preview pane. Mirrors the behavior of selectFile() from sourcetype mode
+ * but routes directly by relative path rather than sourcetype lookup.
+ * @param {Object} node - File node from the folder tree
+ * @param {Event} event - Click event (used to mark the item active)
+ */
+function selectFolderFile(node, event) {
+  // Deselect all items
+  document.querySelectorAll('.browse-st-item').forEach(el => el.classList.remove('active'));
+  if (event && event.currentTarget) {
+    event.currentTarget.classList.add('active');
+  }
+
+  browseState.selectedST = null;
+  browseState.selectedFile = node.path;
+  browseState.previewOffset = 0;
+  browseState.previewPath = node.path;
+
+  // Update breadcrumb with folder path
+  const bc = document.getElementById('browse-breadcrumb');
+  const parts = node.path.split('/');
+  const SEP = '<span>/</span>';
+  bc.innerHTML = parts.map((p, i) =>
+    i === parts.length - 1
+      ? '<span class="bc-seg bc-last">' + escHtml(p) + '</span>'
+      : '<span class="bc-seg">' + escHtml(p) + '</span>'
+  ).join(SEP);
+
+  // Show file info in files container
+  const container = document.getElementById('browse-files-container');
+  document.getElementById('browse-files-section-header').style.display = 'flex';
+  container.style.display = '';
+  container.innerHTML = '<table class="browse-files-table"><thead><tr><th>File</th><th>Size</th><th>Modified</th><th>Lines</th></tr></thead><tbody><tr class="browse-file-row active"><td>' + escHtml(node.name) + '</td><td>' + escHtml(node.size_human) + '</td><td>' + escHtml(node.modified) + '</td><td>' + (node.lines || '?') + '</td></tr></tbody></table>';
+
+  // Show HQL editor
+  const editorWrap = document.getElementById('hql-editor-wrap');
+  if (editorWrap) editorWrap.style.display = '';
+
+  // Load preview
+  loadPreview(node.path);
 }
 
 /**

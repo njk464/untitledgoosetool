@@ -633,6 +633,68 @@ def api_browse_tree():
     return jsonify(tree)
 
 
+@app.route('/api/browse/folder-tree')
+def api_browse_folder_tree():
+    """Return the output directory as a folder tree with file metadata.
+
+    Walks the output directory recursively, skipping hidden files/dirs
+    (starting with '.') and __pycache__. Returns a nested structure.
+
+    Returns:
+        200 JSON: {'name': 'output', 'children': [...], 'file_count': N}
+        Each node is either:
+        - directory: {name, children, file_count, type: 'dir'}
+        - file: {name, path (relative), size, size_human, modified, lines, type: 'file'}
+    """
+    output_dir = _get_output_dir()
+    if not os.path.isdir(output_dir):
+        return jsonify({'name': os.path.basename(output_dir), 'children': [], 'file_count': 0, 'type': 'dir'})
+
+    def walk_dir(dirpath, rel_prefix=''):
+        children = []
+        file_count = 0
+        try:
+            entries = sorted(os.scandir(dirpath), key=lambda e: (not e.is_dir(), e.name.lower()))
+        except PermissionError:
+            return {'name': os.path.basename(dirpath), 'children': [], 'file_count': 0, 'type': 'dir'}
+
+        for entry in entries:
+            if entry.name.startswith('.') or entry.name == '__pycache__':
+                continue
+            rel_path = os.path.join(rel_prefix, entry.name) if rel_prefix else entry.name
+            if entry.is_dir(follow_symlinks=False):
+                child = walk_dir(entry.path, rel_path)
+                if child['file_count'] > 0:  # Only include non-empty dirs
+                    children.append(child)
+                    file_count += child['file_count']
+            elif entry.is_file(follow_symlinks=False):
+                try:
+                    stat = entry.stat()
+                except OSError:
+                    continue
+                mtime = datetime.datetime.fromtimestamp(stat.st_mtime).isoformat(timespec='seconds')
+                children.append({
+                    'name': entry.name,
+                    'path': rel_path,
+                    'size': stat.st_size,
+                    'size_human': _size_human(stat.st_size),
+                    'modified': mtime,
+                    'lines': _count_lines(entry.path),
+                    'type': 'file',
+                })
+                file_count += 1
+
+        return {
+            'name': os.path.basename(dirpath),
+            'children': children,
+            'file_count': file_count,
+            'type': 'dir',
+        }
+
+    tree = walk_dir(output_dir)
+    return jsonify(tree)
+
+
 @app.route('/api/browse/files')
 def api_browse_files():
     """Return the list of files for a specific sourcetype with metadata.
