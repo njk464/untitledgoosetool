@@ -283,6 +283,8 @@ class MDEDataDumper(DataDumper):
                             self.logger.debug(f"Total Logs pulled {skip}")
                             percent_done = ((last_date - orig_start) / (end - orig_start)) * 100
                             if percent_done == prev_percent_done and not archived and result["total"] > 0:
+                                if "gte" not in filters["date"]:
+                                    filters["date"]["gte"] = filters["date"]["range"][0]["start"]
                                 filters["date"]["gte"] += 100
                                 filters["date"]["range"][0]["start"] = filters["date"]["gte"]
                                 has_data = True

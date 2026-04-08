@@ -712,12 +712,17 @@ class M365DataDumper(DataDumper):
         Used to verify that returned results actually fall within the expected time bounds,
         since the UAL API can sometimes return results outside the requested range.
         """
-        start = dateutil.parser.parse(json.loads(results[0]["AuditData"])["CreationTime"]).replace(tzinfo=None)
+        parsed = dateutil.parser.parse(json.loads(results[0]["AuditData"])["CreationTime"])
+        if parsed.tzinfo is None:
+            parsed = utc.localize(parsed)
+        start = parsed
         end = start
         for idx, entry in enumerate(results):
-            time = dateutil.parser.parse(json.loads(entry["AuditData"])["CreationTime"]).replace(tzinfo=None)
-            start = min(time, start)
-            end = max(time, end)
+            parsed = dateutil.parser.parse(json.loads(entry["AuditData"])["CreationTime"])
+            if parsed.tzinfo is None:
+                parsed = utc.localize(parsed)
+            start = min(parsed, start)
+            end = max(parsed, end)
 
         return start, end
 
