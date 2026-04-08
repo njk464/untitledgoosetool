@@ -1219,6 +1219,8 @@ class M365DataDumper(DataDumper):
 
         # Calculate stats for incremental progress tracking
         self.initial_total_time_saved = 0
+        if finished_time_ranges == None:
+            finished_time_ranges = []
         for time_range in finished_time_ranges:
             self.initial_total_time_saved += (time_range["end"] - time_range["start"]).total_seconds()
 

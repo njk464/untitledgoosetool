@@ -39,7 +39,7 @@ from azure.identity import InteractiveBrowserCredential, DeviceCodeCredential
 from azure.mgmt.resource import SubscriptionClient
 from azure.mgmt.authorization import AuthorizationManagementClient
 
-from goosey.utils import write_auth
+from goosey.utils import write_auth, EXO_ANCHOR_MAILBOX
 
 # API permissions to assign to the service principal (application permissions).
 # Keys are the display names of resource applications (as registered in Entra ID).
@@ -114,7 +114,8 @@ EXCHANGE_ROLES = [
 # Microsoft Graph PowerShell SDK client ID — pre-authorized for Graph API
 GRAPH_POWERSHELL_CLIENT_ID = "14d82eec-204b-4c2f-b7e8-296a70dab67e"
 # Azure PowerShell client ID — used for Exchange Online auth
-AZ_POWERSHELL_CLIENT_ID = "1950a258-227b-4e31-a9cf-717495945fc2"
+# AZ_POWERSHELL_CLIENT_ID = "1950a258-227b-4e31-a9cf-717495945fc2"
+AZ_POWERSHELL_CLIENT_ID = "fb78d390-0c51-40cd-8e17-fdbfab77341b"
 
 
 def get_env_config(gcc_high=False):
@@ -255,6 +256,8 @@ class ExchangeClient:
             "X-ResponseFormat": "json",
             "X-CmdletName": cmdlet,
             "X-ClientApplication": "ExoManagementModule",
+            "X-AnchorMailbox": EXO_ANCHOR_MAILBOX,
+            "Accept-Encoding": "gzip, deflate"
         }
         payload = {
             "CmdletInput": {
@@ -423,7 +426,7 @@ def create_exchange_sp(exo, graph, app_name):
             raise RuntimeError("not found")
     except Exception:
         try:
-            exo.run_cmdlet("New-RoleGroup", {"Name": app_name, "Roles": ",".join(EXCHANGE_ROLES)})
+            exo.run_cmdlet("New-RoleGroup", {"Name": app_name, "Roles": EXCHANGE_ROLES})
             print(f"  Role group '{app_name}' created.")
         except Exception as e:
             print(f"  ERROR creating role group: {e}")
@@ -719,7 +722,7 @@ def setup(app_name=None,
         sub_ids = ",".join(subscriptions_used) if subscriptions_used else "All"
         print("\n" + "=" * 70)
         print("Setup complete! Generate your Goosey configuration with:\n")
-        print(f"  goosey conf --config_tenant={tenant_id} --config_subscriptionid={sub_ids} --auth_appid={app_id}")
+        print(f"  goosey conf --config_tenant={tenant_id} --config_subscriptionid={sub_ids}")
         print(f"\nThe client secret has been saved to your .auth file.")
         print(f"You can skip the client secret prompt during goosey conf.")
         print("=" * 70)
