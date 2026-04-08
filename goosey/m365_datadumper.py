@@ -754,7 +754,37 @@ class M365DataDumper(DataDumper):
         self.logger.debug(f"{percent_done:.1f}% Done | Rate: {rate} logs/hour | Saved: {self.total_ual_logs_saved} | ETA: {estimated_eta}")
         return (total_estimated_logs, estimated_eta, rate)
 
-    async def _new_ual_timeframe(self, start, end, retries=20, statefile=None, boundsfile=None, session_results=[], sessionId=None, isolated=False, caller="", ual_progress=None, range_total_hours=None):
+    def _sync_ual_progress_bar(self, ual_progress, statefile):
+        """Update the UAL progress bar by reading the state file.
+
+        Reads completed time ranges from the state file to compute total covered
+        seconds, then advances the bar to reflect actual progress. This avoids
+        the fragile incremental-closure approach where progress was tracked by
+        each _new_ual_timeframe call independently, causing the bar to stall.
+        """
+        if not ual_progress or not ual_progress.get("bar"):
+            return
+        current_state = load_state(statefile, is_datetime=False, time_range=True)
+        if not current_state:
+            return
+        total_saved_secs = sum(
+            (tr["end"] - tr["start"]).total_seconds() for tr in current_state
+        )
+        new_covered_secs = max(total_saved_secs - self.initial_total_time_saved, 0)
+        # Convert to hours (matching the bar's unit)
+        new_hours = int(new_covered_secs / 3600)
+        # Clamp to total
+        new_hours = min(new_hours, ual_progress["total_hours"])
+        delta = new_hours - ual_progress["hours_done"]
+        if delta > 0:
+            ual_progress["bar"].update(delta)
+            ual_progress["hours_done"] = new_hours
+        # Update postfix with log count and rate
+        elapsed_time = time.perf_counter() - self.ual_seconds
+        rate = int(self.total_ual_logs_saved / max(elapsed_time, 1) * 60 * 60)
+        ual_progress["bar"].set_postfix_str(f"{self.total_ual_logs_saved} logs | {rate} logs/hr")
+
+    async def _new_ual_timeframe(self, start, end, retries=20, statefile=None, boundsfile=None, session_results=[], sessionId=None, isolated=False, caller="", ual_progress=None):
         """Core UAL collection engine: searches a time range and collects all audit logs.
 
         This implements a binary-search approach to handle large log volumes:
@@ -789,7 +819,6 @@ class M365DataDumper(DataDumper):
             isolated: True when this is a dedicated sub-task for a single time slice.
             caller: Name of the parent task for labeling sub-tasks.
             ual_progress: Shared progress dict with 'bar', 'pm', 'bar_name', 'hours_done', 'total_hours'.
-            range_total_hours: This range's share of total hours in the progress bar.
         """
 
         response_count = 0
@@ -806,37 +835,6 @@ class M365DataDumper(DataDumper):
         if isolated:
             SESSION_TIMEOUT_BASE_ORIG = 1200
         SESSION_TIMEOUT_BASE = SESSION_TIMEOUT_BASE_ORIG
-
-        # Time-based progress tracking (only for non-isolated parent tasks)
-        orig_start = start
-        my_hours_reported = 0
-
-        def _update_ual_progress(covered_end, ual_progress):
-            """Update the shared UAL time-based progress bar."""
-            nonlocal my_hours_reported
-            if not ual_progress or not ual_progress.get("bar"):
-                return
-            covered_secs = max((covered_end - orig_start).total_seconds(), 0)
-            total_secs = max((finalEnd - orig_start).total_seconds(), 1)
-            fraction = min(covered_secs / total_secs, 1.0)
-            my_covered = int(fraction * (range_total_hours or 0))
-            delta = my_covered - my_hours_reported
-            self.logger.debug(f"progress: {delta}")
-            if delta > 0:
-                ual_progress["bar"].update(delta)
-                ual_progress["hours_done"] += delta
-                my_hours_reported = my_covered
-
-        def _complete_ual_progress(ual_progress):
-            """Flush remaining hours for this range to the shared bar."""
-            nonlocal my_hours_reported
-            if not ual_progress or not ual_progress.get("bar") or isolated:
-                return
-            delta = (range_total_hours or 0) - my_hours_reported
-            if delta > 0:
-                ual_progress["bar"].update(delta)
-                ual_progress["hours_done"] += delta
-                my_hours_reported = range_total_hours or 0
 
         # continue the session if this is a created a task
         if isolated and sessionId and session_results:
@@ -1076,7 +1074,8 @@ class M365DataDumper(DataDumper):
                             self.logger.debug("Waiting for ual dumpers to complete before starting more")
                             finished, ual_tasks_l = await asyncio.wait(self.ual_tasks, return_when=asyncio.FIRST_COMPLETED)
                             self.ual_tasks = list(ual_tasks_l)
-                        self.ual_tasks.append(asyncio.create_task(self._new_ual_timeframe(start, end, statefile=statefile, isolated=True, session_results=session_results, sessionId=sessionId, boundsfile=boundsfile, ual_progress=ual_progress), name=f"{caller}_dumper_{start.isoformat()}_{end.isoformat()}"))
+                            self._sync_ual_progress_bar(ual_progress, statefile)
+                        self.ual_tasks.append(asyncio.create_task(self._new_ual_timeframe(start, end, statefile=statefile, isolated=True, session_results=session_results, sessionId=sessionId, boundsfile=boundsfile), name=f"{caller}_dumper_{start.isoformat()}_{end.isoformat()}"))
                         new_task_created = True
                         response_count += sessionCount
                         break
@@ -1129,14 +1128,13 @@ class M365DataDumper(DataDumper):
                 elapsed_time = time.perf_counter() - self.ual_seconds
                 rate = int(self.total_ual_logs_saved / max(elapsed_time, 1) * 60 * 60)
                 self.logger.info(f"Saved {len(session_results)} logs. Current rate is {rate} logs/hours")
-                if ual_progress and ual_progress.get("bar"):
-                    ual_progress["bar"].set_postfix_str(f"{self.total_ual_logs_saved} logs | {rate} logs/hr")
+                # Sync progress bar from state file so isolated sub-tasks' contributions
+                # are reflected in the parent's progress bar immediately.
+                self._sync_ual_progress_bar(ual_progress, statefile)
                 end = saved_end
 
             if new_task_created or data_saved:
                 start = end
-                if data_saved:
-                    _update_ual_progress(start, ual_progress)
                 end = finalEnd
                 #self.logger.debug(f"start/end before bounds {start}/{end}")
                 end,_ = self.find_bounds_end_size(start, end)
@@ -1148,7 +1146,7 @@ class M365DataDumper(DataDumper):
 
         if not isolated:
             await asyncio.gather(*self.ual_tasks)
-        #_complete_ual_progress(ual_progress)
+            self._sync_ual_progress_bar(ual_progress, statefile)
 
     async def dump_ual(self):
         """Collect the Unified Audit Log (UAL) via Search-UnifiedAuditLog.
@@ -1265,7 +1263,7 @@ class M365DataDumper(DataDumper):
             end = end.replace(microsecond=0)
             self.logger.info(f"Goosey collecting ual logs from : {start} -> {end}")
             caller_name = asyncio.current_task().get_name()
-            tasks.append(asyncio.create_task(self._new_ual_timeframe(start, end, statefile=statefile, boundsfile=boundsfile, caller=caller_name, ual_progress=ual_progress, range_total_hours=range_hours_list[i]),name=f"{caller_name}_bounding_{start.isoformat()}_{end.isoformat()}"))
+            tasks.append(asyncio.create_task(self._new_ual_timeframe(start, end, statefile=statefile, boundsfile=boundsfile, caller=caller_name, ual_progress=ual_progress),name=f"{caller_name}_bounding_{start.isoformat()}_{end.isoformat()}"))
 
         try:
             await asyncio.gather(*tasks)
