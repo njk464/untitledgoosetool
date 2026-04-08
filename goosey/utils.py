@@ -789,8 +789,15 @@ def load_state(filepath, is_datetime=True, time_range=False, time_bounds=False):
             new_time_range = []
             for entry in saved_time_range:
                 start, end = entry["start"], entry["end"]
-                entry["start"] = dateutil.parser.parse(start)
-                entry["end"] = dateutil.parser.parse(end)
+                parsed_start = dateutil.parser.parse(start)
+                parsed_end = dateutil.parser.parse(end)
+                # Ensure tz-aware to avoid naive/aware comparison errors
+                if parsed_start.tzinfo is None:
+                    parsed_start = pytz.utc.localize(parsed_start)
+                if parsed_end.tzinfo is None:
+                    parsed_end = pytz.utc.localize(parsed_end)
+                entry["start"] = parsed_start
+                entry["end"] = parsed_end
                 new_time_range.append(entry)
             return new_time_range
         return end

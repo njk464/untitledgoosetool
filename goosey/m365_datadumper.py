@@ -1169,12 +1169,14 @@ class M365DataDumper(DataDumper):
 
         # Default: collect the last 364 days (UAL max retention is typically 1 year)
         end = get_end_time_yesterday()
+        if end.tzinfo is None:
+            end = utc.localize(end)
         start = end - timedelta(days=364)
 
         if self.date_range:
             self.logger.debug(f'UAL Dump using specified date range: {self.date_start} to {self.date_end}')
-            start = datetime.strptime(self.date_start,"%Y-%m-%d")
-            end = datetime.strptime(self.date_end,"%Y-%m-%d")
+            start = utc.localize(datetime.strptime(self.date_start, "%Y-%m-%d"))
+            end = utc.localize(datetime.strptime(self.date_end, "%Y-%m-%d"))
 
         # Restore bounds state from previous run (tracks sub-range search progress)
         bounds_save_state = load_state(boundsfile, is_datetime=False, time_bounds=True)

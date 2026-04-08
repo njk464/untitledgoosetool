@@ -60,6 +60,9 @@ PERMISSIONS = {
         "Ti.ReadWrite",
         "Vulnerability.Read.All",
     ],
+    "Microsoft Cloud App Security": [
+        "investigation.read",
+    ],
     "Office 365 Exchange Online": [
         "Exchange.ManageAsApp",
     ],
