@@ -716,8 +716,8 @@ def get_section_dict(config, section, logger=None):
     return {}
 
 def get_end_time_yesterday():
-    yesterday = date.today() - timedelta(days=1)
-    return datetime.combine(yesterday, datetime.max.time())
+    yesterday = datetime.now(utc).date() - timedelta(days=1)
+    return utc.localize(datetime.combine(yesterday, datetime.max.time()))
 
 def get_date_range(config, logger=logging):
     """
@@ -741,7 +741,7 @@ def get_date_range(config, logger=logging):
         if config_get(config, 'filters', 'date_end') != '':
             date_end = config_get(config, 'filters', 'date_end')
         else:
-            date_end = datetime.now().strftime("%Y-%m-%d") +':00:00.000Z'
+            date_end = datetime.now().strftime("%Y-%m-%d")
     else:
         date_range=False
 
@@ -866,7 +866,7 @@ def find_time_gaps(time_range, start, end):
         if record["start"] < end or record["end"] > start:
             max_start = max(record["start"], start)
             min_end = min(record["end"], end)
-            actual_gaps.append({"start": max_start, "end": min_end})
+            actual_gaps.append({"start": max_start.astimezone(utc), "end": min_end.astimezone(utc)})
 
     return actual_gaps
 

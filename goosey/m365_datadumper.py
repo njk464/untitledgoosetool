@@ -721,6 +721,8 @@ class M365DataDumper(DataDumper):
             parsed = dateutil.parser.parse(json.loads(entry["AuditData"])["CreationTime"])
             if parsed.tzinfo is None:
                 parsed = utc.localize(parsed)
+            else:
+                self.logger.debug(parsed.tzinfo)
             start = min(parsed, start)
             end = max(parsed, end)
 
@@ -809,22 +811,25 @@ class M365DataDumper(DataDumper):
         orig_start = start
         my_hours_reported = 0
 
-        def _update_ual_progress(covered_end):
+        def _update_ual_progress(covered_end, ual_progress):
             """Update the shared UAL time-based progress bar."""
             nonlocal my_hours_reported
-            if not ual_progress or not ual_progress.get("bar") or isolated:
-                return
+            self.logger.debug("updating progress")
+            #if not ual_progress or not ual_progress.get("bar") or not isolated:
+            #    return
+            self.logger.debug("progress got here")
             covered_secs = max((covered_end - orig_start).total_seconds(), 0)
             total_secs = max((finalEnd - orig_start).total_seconds(), 1)
             fraction = min(covered_secs / total_secs, 1.0)
             my_covered = int(fraction * (range_total_hours or 0))
             delta = my_covered - my_hours_reported
+            self.logger.debug(f"progress: {delta}")
             if delta > 0:
                 ual_progress["bar"].update(delta)
                 ual_progress["hours_done"] += delta
                 my_hours_reported = my_covered
 
-        def _complete_ual_progress():
+        def _complete_ual_progress(ual_progress):
             """Flush remaining hours for this range to the shared bar."""
             nonlocal my_hours_reported
             if not ual_progress or not ual_progress.get("bar") or isolated:
@@ -951,7 +956,7 @@ class M365DataDumper(DataDumper):
                         tries += 1
                         self.logger.debug(f"Too many logs. Couldn't calculate total count. Halving. tries == {tries}/{retries}")
                         new_end_ts = start.timestamp() + ((end.timestamp() - start.timestamp())/2)
-                        end = datetime.fromtimestamp(new_end_ts).replace(microsecond=0)
+                        end = datetime.fromtimestamp(new_end_ts).replace(microsecond=0).astimezone(utc)
                         break
                     tries = 0
                     sessionCount = int(response_dict['value'][0]['ResultCount'])
@@ -1055,7 +1060,7 @@ class M365DataDumper(DataDumper):
                         self.logger.debug(f"{sessionCount} results found within bounds. Exceeds result limit {self.threshold}")
                         # half the difference between the start and end time
                         new_end_ts = start.timestamp() + ((end.timestamp() - start.timestamp())/2)
-                        end = datetime.fromtimestamp(new_end_ts).replace(microsecond=0)
+                        end = datetime.fromtimestamp(new_end_ts).replace(microsecond=0).astimezone(utc)
 
                         break
 
@@ -1132,7 +1137,8 @@ class M365DataDumper(DataDumper):
 
             if new_task_created or data_saved:
                 start = end
-                _update_ual_progress(start)
+                if data_saved:
+                    _update_ual_progress(start, ual_progress)
                 end = finalEnd
                 #self.logger.debug(f"start/end before bounds {start}/{end}")
                 end,_ = self.find_bounds_end_size(start, end)
@@ -1144,7 +1150,7 @@ class M365DataDumper(DataDumper):
 
         if not isolated:
             await asyncio.gather(*self.ual_tasks)
-        _complete_ual_progress()
+        #_complete_ual_progress(ual_progress)
 
     async def dump_ual(self):
         """Collect the Unified Audit Log (UAL) via Search-UnifiedAuditLog.
