@@ -812,7 +812,7 @@ class M365DataDumper(DataDumper):
         def _update_ual_progress(covered_end):
             """Update the shared UAL time-based progress bar."""
             nonlocal my_hours_reported
-            if not ual_progress or not ual_progress.get("bar") or isolated:
+            if not ual_progress or not ual_progress.get("bar"):
                 return
             covered_secs = max((covered_end - orig_start).total_seconds(), 0)
             total_secs = max((finalEnd - orig_start).total_seconds(), 1)
@@ -1073,7 +1073,7 @@ class M365DataDumper(DataDumper):
                             self.logger.debug("Waiting for ual dumpers to complete before starting more")
                             finished, ual_tasks_l = await asyncio.wait(self.ual_tasks, return_when=asyncio.FIRST_COMPLETED)
                             self.ual_tasks = list(ual_tasks_l)
-                        self.ual_tasks.append(asyncio.create_task(self._new_ual_timeframe(start, end, statefile=statefile, isolated=True, session_results=session_results, sessionId=sessionId, boundsfile=boundsfile), name=f"{caller}_dumper_{start.isoformat()}_{end.isoformat()}"))
+                        self.ual_tasks.append(asyncio.create_task(self._new_ual_timeframe(start, end, statefile=statefile, isolated=True, session_results=session_results, sessionId=sessionId, boundsfile=boundsfile, ual_progress=ual_progress), name=f"{caller}_dumper_{start.isoformat()}_{end.isoformat()}"))
                         new_task_created = True
                         response_count += sessionCount
                         break
