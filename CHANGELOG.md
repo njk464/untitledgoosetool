@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 - Web UI: Device code OAuth login flow for MDE portal auth — automated alternative to manual ESTS cookie entry, with refresh token persistence
 
 ### Fixed
+- M365: Rewrite UAL progress bar to sync from state file instead of closure-based tracking — eliminates stale progress on retry/resume
 - Entra ID: Fix hang bugs in sign-in log collection (missing nextLink exits, retry overflow) and collapse progress bars on completion
 - Web UI: Fix dump_ key naming bug in conf save/load (keys written with `dump_` prefix caused data_dump() method lookup failures)
 - Web UI: Replace tqdm progress bars with JSON-based progress polling (tqdm ANSI output corrupted web UI terminal)
