@@ -78,10 +78,10 @@ New `EdiscoveryDataDumper` at the same level as m365/azure/entraid/mde, tracked 
 - Phase 2 content export (read/write, opt-in, resumable, double-gated)
 - Docs (DATADUMPERS.md, CHANGELOG, this plan)
 
-**Remaining:**
-- `oz3.7` — expose eDiscovery in the web UI (setup/collect)
-- `oz3.4.1` — refine Copilot-via-eDiscovery content query (KQL/itemclass)
-- `oz3.4.2` — targeted SharePoint/OneDrive site sources for export
+- Web UI: eDiscovery collection card + `--ediscovery` override
+- Targeted SharePoint/OneDrive site sources (`oz3.4.2`) and grounded Copilot item-class query (`oz3.4.1`)
+
+**Status:** All beads under epic `oz3` closed. Delivered on branch `feature/ediscovery` — pending review/merge to `develop`.
 
 Decisions: DEC-EDISC-001..004.
 
