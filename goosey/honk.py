@@ -29,6 +29,7 @@ from tqdm import tqdm
 from goosey.entra_id_datadumper import EntraIdDataDumper
 from goosey.azure_dumper import AzureDataDumper
 from goosey.datadumper import DataDumper
+from goosey.ediscovery_datadumper import EdiscoveryDataDumper
 from goosey.m365_datadumper import M365DataDumper
 from goosey.mde_datadumper import MDEDataDumper
 from goosey.utils import *
@@ -88,13 +89,14 @@ async def run(args, config, auth, init_sections, auth_un_pw=None):
     force_repull = getattr(args, 'force_repull', False)
     maindumper = DataDumper(args.output_dir, args.reports_dir, msft_graph_app_auth, session, args.debug, token_manager=token_manager, endpoint_key="graph_api", force_repull=force_repull)
 
-    m365, entraid, azure, mde = False, False, False, False
+    m365, entraid, azure, mde, ediscovery = False, False, False, False, False
 
     if args.dry_run:
         m365dumper = maindumper
         entraiddumper = maindumper
         azure_dumper = maindumper
         mdedumper = maindumper
+        ediscoverydumper = maindumper
 
     else:
         if 'm365' in init_sections:
@@ -110,6 +112,9 @@ async def run(args, config, auth, init_sections, auth_un_pw=None):
             portal_auth = auth.get('portal_auth')
             mdedumper = MDEDataDumper(args.output_dir, args.reports_dir, msft_security_center_auth, msft_security_auth, msft_graph_app_auth, cloudapp_defender_auth, maindumper.ahsession, config, args.debug, token_manager=token_manager, portal_auth=portal_auth, force_repull=force_repull)
             mde = True
+        if 'ediscovery' in init_sections:
+            ediscoverydumper = EdiscoveryDataDumper(args.output_dir, args.reports_dir, msft_graph_app_auth, maindumper.ahsession, config, args.debug, token_manager=token_manager, force_repull=force_repull)
+            ediscovery = True
 
     progress_file = os.path.join(args.output_dir, '.progress.json')
     pm = init_progress_manager(enabled=not args.debug, progress_file=progress_file)
@@ -124,6 +129,8 @@ async def run(args, config, auth, init_sections, auth_un_pw=None):
             tasks.extend(azure_dumper.data_dump(data_calls['azure'], "azure"))
         if mde:
             tasks.extend(mdedumper.data_dump(data_calls['mde'], "mde"))
+        if ediscovery:
+            tasks.extend(ediscoverydumper.data_dump(data_calls['ediscovery'], "ediscovery"))
 
         honk_results = await asyncio.gather(*tasks)
 
@@ -173,7 +180,7 @@ def parse_config(configfile, args, auth=None):
     config.read(configfile)
 
     if not auth:
-        sections = ['azure', 'm365', 'entraid', 'mde']
+        sections = ['azure', 'm365', 'entraid', 'mde', 'ediscovery']
     else:
         sections = ['auth']
 
@@ -204,6 +211,10 @@ def parse_config(configfile, args, auth=None):
         for item in [x.replace('dump_', '') for x in dir(MDEDataDumper) if x.startswith('dump_')]:
             data_calls['mde'][item] = True
         init_sections.append("mde")
+    if args.ediscovery:
+        for item in [x.replace('dump_', '') for x in dir(EdiscoveryDataDumper) if x.startswith('dump_')]:
+            data_calls['ediscovery'][item] = True
+        init_sections.append("ediscovery")
 
     # Apply CLI overrides to config sections (CLI args take precedence over .conf values)
     cli_overrides = {
@@ -241,6 +252,7 @@ def honk(authfile=".ugt_auth",
          entraid=False,
          m365=False,
          mde=False,
+         ediscovery=False,
          force_repull=False,
          insecure=False,
          encryption_pw=None,
@@ -283,6 +295,7 @@ def honk(authfile=".ugt_auth",
         entraid: Set all of the Entra ID calls to true
         m365: Set all of the M365 calls to true
         mde: Set all of the MDE calls to true
+        ediscovery: Set all of the eDiscovery calls to true
         force_repull: Ignore save states for snapshot (non-time-based) dumpers and re-pull all data
         insecure: Disable secure authentication handling (file encryption)
         encryption_pw: Password for the auth file encryption (prompted if not provided)
@@ -339,6 +352,7 @@ def honk(authfile=".ugt_auth",
     check_output_dir(f'{args.output_dir}{os.path.sep}m365', logger)
     check_output_dir(f'{args.output_dir}{os.path.sep}entraid', logger)
     check_output_dir(f'{args.output_dir}{os.path.sep}mde', logger)
+    check_output_dir(f'{args.output_dir}{os.path.sep}ediscovery', logger)
     config, init_sections = parse_config(args.config, args)
 
     logger.info("Goosey beginning to honk.")
