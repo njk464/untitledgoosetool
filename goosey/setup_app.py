@@ -74,6 +74,12 @@ PERMISSIONS = {
         "ConsentRequest.Read.All",
         "Directory.Read.All",
         "Domain.Read.All",
+        # eDiscovery: Read.All for the read-only snapshot dumpers; ReadWrite.All for
+        # Phase 2 content export (create case/search, add-to-review-set, export/download).
+        # Goosey authenticates to Graph app-only (client credentials), and app-only
+        # eDiscovery access requires an E5 / eDiscovery add-on subscription.
+        "eDiscovery.Read.All",
+        "eDiscovery.ReadWrite.All",
         "ExternalUserProfile.Read.All",
         "Group.Read.All",
         "IdentityProvider.Read.All",
