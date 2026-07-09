@@ -14,6 +14,7 @@ from goosey.utils import *
 
 from goosey.entra_id_datadumper import EntraIdDataDumper
 from goosey.d4iot_dumper import DefenderIoTDumper
+from goosey.ediscovery_datadumper import EdiscoveryDataDumper
 from goosey.m365_datadumper import M365DataDumper
 from goosey.azure_dumper import AzureDataDumper
 from goosey.mde_datadumper import MDEDataDumper
@@ -75,6 +76,7 @@ def genconf(outpath_auth=".auth",
             entraid=False,
             m365=False,
             mde=False,
+            ediscovery=False,
             outpath_d4iotauth=".auth_d4iot",
             outpath_d4iotconf=".d4iot_conf",
             d4iotauth_username=None,
@@ -121,6 +123,7 @@ def genconf(outpath_auth=".auth",
         entraid: Enable all entraid log collection
         m365: Enable all m365 log collection
         mde: Enable all mde log collection
+        ediscovery: Enable all eDiscovery log collection
         outpath_d4iotauth: Path to output the d4iot auth config
         outpath_d4iotconf: Path to output the d4iot goose config
         d4iotauth_username: Username for your D4IoT sensor login page
@@ -190,7 +193,8 @@ def genconf(outpath_auth=".auth",
     dumpers = {"azure": AzureDataDumper,
                "entraid": EntraIdDataDumper,
                "m365": M365DataDumper,
-               "mde": MDEDataDumper}
+               "mde": MDEDataDumper,
+               "ediscovery": EdiscoveryDataDumper}
     # Go through each data dumper and generate the config values for each dump method
     for section_name, section_func in dumpers.items():
         func_args = {}
