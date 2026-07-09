@@ -53,10 +53,15 @@ EXPORT_CONTENT_TYPES = {
     # content type -> (default contentQuery KQL, tenant-wide dataSourceScope)
     "email":      ("kind:email", "allTenantMailboxes"),
     "teams":      ("kind:im", "allTenantMailboxes"),
-    # Copilot interactions are message-class items in mailboxes; the precise item-class
-    # filter is best-effort (see untitledgoosetool-oz3.4.1). dump_copilot_interactions
-    # (aiInteractionHistory) is the reliable Copilot path.
-    "copilot":    ("kind:im", "allTenantMailboxes"),
+    # Copilot / AI interactions are stored as message-class items in user mailboxes. These
+    # item-class families (Microsoft 365 Copilot, connected/cloud AI apps, Teams Copilot)
+    # come from Microsoft's "Search for and delete AI application data in eDiscovery" guide
+    # and match the condition builder's "Copilot activity" option. dump_copilot_interactions
+    # (aiInteractionHistory) remains the structured, read-only Copilot path.
+    "copilot":    ("itemclass:IPM.SkypeTeams.Message.Copilot* OR "
+                   "itemclass:IPM.SkypeTeams.Message.ConnectedAIApp* OR "
+                   "itemclass:IPM.SkypeTeams.Message.CloudAIApp* OR "
+                   "itemclass:IPM.SkypeTeams.Message.TeamCopilot*", "allTenantMailboxes"),
     "sharepoint": ("", "allTenantSites"),
 }
 
