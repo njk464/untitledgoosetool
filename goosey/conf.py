@@ -75,6 +75,7 @@ def genconf(outpath_auth=".auth",
             variable_ediscovery_export_confirm=False,
             variable_ediscovery_export_content_types="email,teams,copilot,sharepoint",
             variable_ediscovery_export_targets=None,
+            variable_ediscovery_export_site_targets=None,
             variable_ediscovery_case_name="UntitledGooseTool",
             variable_ediscovery_export_format="pst",
             variable_ediscovery_export_download=True,
@@ -128,7 +129,8 @@ def genconf(outpath_auth=".auth",
         variable_mde_query_mode: can be either 'table' or 'machine'. 'table' will pull directly from the mde tables without filtering. While 'machine' will filter by 'machine' with large tenants 'machine' will likely be prefered as time bounding on the entire table will likely cause issues.
         variable_ediscovery_export_confirm: HARD SAFETY GATE for the eDiscovery content export (dump_ediscovery_export). That method CREATES a case, searches, and exports in your tenant. It is a no-op unless this is set to true.
         variable_ediscovery_export_content_types: Comma-separated content types to export via eDiscovery. Options: email, teams, copilot, sharepoint.
-        variable_ediscovery_export_targets: Comma-separated custodian UPNs/emails to target the export (e.g. user@contoso.com). Leave empty for a tenant-wide export (all mailboxes/sites).
+        variable_ediscovery_export_targets: Comma-separated custodian UPNs/emails to target the mailbox export (email/Teams/Copilot) (e.g. user@contoso.com). Leave empty for a tenant-wide export (all mailboxes).
+        variable_ediscovery_export_site_targets: Comma-separated SharePoint/OneDrive site URLs to target the SharePoint export (e.g. https://contoso.sharepoint.com/sites/X). Leave empty for a tenant-wide export (all sites).
         variable_ediscovery_case_name: Display-name prefix for the eDiscovery export case Goosey creates (a timestamp is appended).
         variable_ediscovery_export_format: Export format for exported emails. Options: pst, msg.
         variable_ediscovery_export_download: Whether to download the export package(s) to output/ediscovery/export/ after the export completes.

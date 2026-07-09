@@ -110,6 +110,7 @@ class EdiscoveryDataDumper(DataDumper):
         self.export_confirm = _var('ediscovery_export_confirm').lower() == "true"
         self.export_content_types = [c.strip().lower() for c in _var('ediscovery_export_content_types', 'email,teams,copilot,sharepoint').split(',') if c.strip()]
         self.export_targets = [t.strip() for t in _var('ediscovery_export_targets').split(',') if t.strip()]
+        self.export_site_targets = [t.strip() for t in _var('ediscovery_export_site_targets').split(',') if t.strip()]
         self.export_case_name = _var('ediscovery_case_name', 'UntitledGooseTool')
         self.export_format = _var('ediscovery_export_format', 'pst').lower()
         self.export_download = _var('ediscovery_export_download', 'true').lower() == "true"
@@ -398,12 +399,33 @@ class EdiscoveryDataDumper(DataDumper):
         self._save_export_state(state)
         return ok
 
+    async def _add_site_sources(self, case_id, state):
+        """Add noncustodial SharePoint/OneDrive site sources for each configured site URL."""
+        if state.get('siteSourcesAdded'):
+            return True
+        ok = False
+        for site_url in self.export_site_targets:
+            status, payload, _ = await self._post_json(
+                '%s%s/%s/noncustodialDataSources' % (self.get_url(), EDISCOVERY_CASES_PATH, case_id),
+                {'dataSource': {'@odata.type': 'microsoft.graph.security.siteSource', 'site': {'webUrl': site_url}}})
+            if payload and payload.get('id'):
+                self.logger.info('Added site source %s to export case.' % site_url)
+                ok = True
+            else:
+                self.logger.error('Failed to add site source %s (status=%s): %s' % (site_url, status, payload))
+        state['siteSourcesAdded'] = ok
+        self._save_export_state(state)
+        return ok
+
     def _content_query_and_scope(self, content_type):
         """Resolve the KQL content query and dataSourceScope for a content type, honoring targets/overrides."""
         default_query, tenant_scope = EXPORT_CONTENT_TYPES[content_type]
         query = self.export_content_query or default_query
-        # Targeted mailbox scoping via custodians; SharePoint site targeting is a follow-up (oz3.4.2).
-        if self.export_targets and content_type != 'sharepoint':
+        if content_type == 'sharepoint':
+            # SharePoint targets are noncustodial site sources; mailbox targets don't apply.
+            scope = 'allCaseNoncustodialDataSources' if self.export_site_targets else tenant_scope
+        elif self.export_targets:
+            # Mailbox content (email/teams/copilot) targeted via custodians.
             scope = 'allCaseCustodians'
         else:
             scope = tenant_scope
@@ -544,7 +566,10 @@ class EdiscoveryDataDumper(DataDumper):
         if self.export_targets:
             self.logger.info('eDiscovery export targeting custodians: %s' % ', '.join(self.export_targets))
             await self._add_custodians(case_id, state)
-        else:
+        if self.export_site_targets:
+            self.logger.info('eDiscovery export targeting site sources: %s' % ', '.join(self.export_site_targets))
+            await self._add_site_sources(case_id, state)
+        if not self.export_targets and not self.export_site_targets:
             self.logger.info('eDiscovery export scope: tenant-wide (no targets configured).')
 
         for content_type in content_types:
