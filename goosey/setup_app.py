@@ -68,6 +68,9 @@ PERMISSIONS = {
     ],
     "Microsoft Graph": [
         "AdministrativeUnit.Read.All",
+        # Copilot interaction export (aiInteractionHistory:getAllEnterpriseInteractions).
+        # Application permission only; requires a Copilot license and is Global-cloud only.
+        "AiEnterpriseInteraction.Read.All",
         "APIConnectors.Read.All",
         "AuditLog.Read.All",
         "AuditLogsQuery.Read.All",

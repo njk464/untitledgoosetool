@@ -62,6 +62,7 @@ class EdiscoveryDataDumper(DataDumper):
         endpoints = get_endpoints(gcc=self.gcc, gcc_high=self.gcc_high)
         self.graph_url = endpoints["graph_api"]
         self.failurefile = os.path.join(reports_dir, '_no_results.json')
+        self.date_range, self.date_start, self.date_end = get_date_range(config, self.logger)
 
         self.call_object = [self.get_url(), self.app_auth, self.logger, self.output_dir, self.get_session()]
 
@@ -72,20 +73,25 @@ class EdiscoveryDataDumper(DataDumper):
     def _auth_header(self):
         return {'Authorization': '%s %s' % (self.app_auth['token_type'], self.app_auth['access_token'])}
 
-    async def _get_json(self, url, timeout=600):
+    async def _get_json(self, url, params=None, timeout=600):
         """GET a Graph URL and return the parsed JSON (or None on transport error)."""
         try:
-            async with self.ahsession.get(url, headers=self._auth_header(), timeout=timeout) as r:
+            async with self.ahsession.get(url, headers=self._auth_header(), params=params, timeout=timeout) as r:
                 return await r.json()
         except Exception as e:
             self.logger.error('eDiscovery request failed for %s: %s' % (url, str(e)))
             return None
 
-    async def _get_collection(self, url):
-        """Fetch a Graph collection, following @odata.nextLink, and return all 'value' entries."""
+    async def _get_collection(self, url, params=None):
+        """Fetch a Graph collection, following @odata.nextLink, and return all 'value' entries.
+
+        `params` (e.g. an OData $filter) is applied to the first request only; subsequent
+        pages use the @odata.nextLink URL which already carries the encoded query.
+        """
         entries = []
         while url:
-            result = await self._get_json(url)
+            result = await self._get_json(url, params=params)
+            params = None
             if result is None:
                 break
             if 'value' not in result:
@@ -206,6 +212,53 @@ class EdiscoveryDataDumper(DataDumper):
     async def dump_ediscovery_operations(self):
         """Dump case operations (add-to-review-set, tag, export, estimate, etc.) per case."""
         await self._dump_case_children('operations', 'ediscovery_operations')
+
+    @requires_auth
+    async def dump_copilot_interactions(self):
+        """Dump Microsoft 365 Copilot interactions (user prompts + AI responses) per user.
+
+        Uses the dedicated Graph aiInteractionHistory:getAllEnterpriseInteractions API
+        (read-only, application permission AiEnterpriseInteraction.Read.All) rather than
+        the eDiscovery export pipeline. This is a non-invasive way to pull Copilot content:
+        each record is a userPrompt or aiResponse with the prompt/response body, app class
+        (Teams, BizChat, etc.), timestamps, and referenced resources.
+
+        The endpoint is per-user, so this enumerates users first, then fetches each user's
+        interaction history (optionally bounded by the configured date range via a
+        createdDateTime $filter). Records are enriched with userId / userPrincipalName.
+
+        Requires a Copilot license and is available in the Global cloud only (not GCC/GCC High).
+
+        API Reference:
+        https://learn.microsoft.com/en-us/microsoft-365-copilot/extensibility/api/ai-services/interaction-export/aiinteractionhistory-getallenterpriseinteractions
+        """
+        if self.gcc or self.gcc_high:
+            self.logger.warning('Copilot interaction export (aiInteractionHistory) is Global-cloud only; skipping for GCC/GCC High.')
+            self._write_records('copilot_interactions', [])
+            return
+
+        users = await self._get_collection(self.get_url() + 'users?$select=id,userPrincipalName')
+        if not users:
+            self.logger.info('No users found; skipping copilot_interactions.')
+            self._write_records('copilot_interactions', [])
+            return
+
+        params = None
+        if self.date_range:
+            params = {'$filter': 'createdDateTime gt %sT00:00:00Z and createdDateTime lt %sT00:00:00Z' % (self.date_start, self.date_end)}
+
+        self.logger.info('Dumping Copilot interactions across %d user(s)...' % len(users))
+        records = []
+        for user in users:
+            uid = user.get('id')
+            upn = user.get('userPrincipalName')
+            url = '%scopilot/users/%s/interactionHistory/getAllEnterpriseInteractions' % (self.get_url(), uid)
+            for entry in await self._get_collection(url, params=params):
+                entry.pop('@odata.type', None)
+                entry['userId'] = uid
+                entry['userPrincipalName'] = upn
+                records.append(entry)
+        self._write_records('copilot_interactions', records)
 
     @requires_auth
     async def dump_ediscovery_review_set_queries(self):
