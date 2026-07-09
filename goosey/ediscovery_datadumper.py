@@ -35,6 +35,7 @@ output/ediscovery/. Case-scoped records are enriched with caseId / caseDisplayNa
 flattened files remain traceable back to their parent case.
 """
 
+import asyncio
 import json
 import os
 
@@ -44,6 +45,38 @@ from goosey.utils import *
 
 # Base path for the eDiscovery API under the Graph v1.0 endpoint.
 EDISCOVERY_CASES_PATH = "security/cases/ediscoveryCases"
+
+# Phase 2 export: default KQL content query and data-source scope per content type.
+# Scopes are the tenant-wide defaults; when targets are supplied they are replaced with
+# allCaseCustodians (mailbox targets). See dump_ediscovery_export.
+EXPORT_CONTENT_TYPES = {
+    # content type -> (default contentQuery KQL, tenant-wide dataSourceScope)
+    "email":      ("kind:email", "allTenantMailboxes"),
+    "teams":      ("kind:im", "allTenantMailboxes"),
+    # Copilot interactions are message-class items in mailboxes; the precise item-class
+    # filter is best-effort (see untitledgoosetool-oz3.4.1). dump_copilot_interactions
+    # (aiInteractionHistory) is the reliable Copilot path.
+    "copilot":    ("kind:im", "allTenantMailboxes"),
+    "sharepoint": ("", "allTenantSites"),
+}
+
+# Poll cadence for long-running case operations (estimate/export).
+EXPORT_POLL_INTERVAL_SECONDS = 30
+EXPORT_POLL_MAX_ATTEMPTS = 240  # ~2 hours at 30s
+
+
+def _operation_id_from(payload, location):
+    """Extract a case-operation id from a 202/200 response payload or its Location header.
+
+    estimateStatistics/exportResult return the operation id either as `id` in the JSON body
+    or embedded in the Location header (.../operations/{operationId}).
+    """
+    if isinstance(payload, dict) and payload.get('id'):
+        return payload['id']
+    if location and '/operations/' in location:
+        tail = location.split('/operations/', 1)[1]
+        return tail.split('?', 1)[0].strip('/')
+    return None
 
 class EdiscoveryDataDumper(DataDumper):
     """Collects Microsoft Purview eDiscovery data via the Microsoft Graph API.
@@ -63,6 +96,24 @@ class EdiscoveryDataDumper(DataDumper):
         self.graph_url = endpoints["graph_api"]
         self.failurefile = os.path.join(reports_dir, '_no_results.json')
         self.date_range, self.date_start, self.date_end = get_date_range(config, self.logger)
+
+        # Phase 2 export options (live in [variables], like ual_*/mde_*). Read quietly:
+        # these are usually absent and config_get would warn on every run.
+        def _var(key, default=""):
+            if config.has_option('variables', key):
+                val = config.get('variables', key)
+                return val if val is not None else default
+            return default
+
+        # ediscovery_export_confirm is a HARD safety gate: the export orchestrator creates
+        # objects in the tenant and is a no-op unless this is explicitly set to true.
+        self.export_confirm = _var('ediscovery_export_confirm').lower() == "true"
+        self.export_content_types = [c.strip().lower() for c in _var('ediscovery_export_content_types', 'email,teams,copilot,sharepoint').split(',') if c.strip()]
+        self.export_targets = [t.strip() for t in _var('ediscovery_export_targets').split(',') if t.strip()]
+        self.export_case_name = _var('ediscovery_case_name', 'UntitledGooseTool')
+        self.export_format = _var('ediscovery_export_format', 'pst').lower()
+        self.export_download = _var('ediscovery_export_download', 'true').lower() == "true"
+        self.export_content_query = _var('ediscovery_content_query')
 
         self.call_object = [self.get_url(), self.app_auth, self.logger, self.output_dir, self.get_session()]
 
@@ -259,6 +310,250 @@ class EdiscoveryDataDumper(DataDumper):
                 entry['userPrincipalName'] = upn
                 records.append(entry)
         self._write_records('copilot_interactions', records)
+
+    # ------------------------------------------------------------------
+    # Phase 2: content export orchestration (WRITES objects to the tenant)
+    # ------------------------------------------------------------------
+
+    async def _post_json(self, url, body):
+        """POST JSON to a Graph URL. Returns (status, parsed_json_or_None, location_header)."""
+        headers = self._auth_header()
+        headers['Content-Type'] = 'application/json'
+        try:
+            async with self.ahsession.post(url, headers=headers, data=json.dumps(body), timeout=600) as r:
+                location = r.headers.get('Location')
+                try:
+                    payload = await r.json()
+                except Exception:
+                    payload = None
+                return r.status, payload, location
+        except Exception as e:
+            self.logger.error('eDiscovery POST failed for %s: %s' % (url, str(e)))
+            return None, None, None
+
+    def _export_statefile(self):
+        return os.path.join(self.output_dir, '.ediscovery_export.savestate')
+
+    def _load_export_state(self):
+        path = self._export_statefile()
+        if os.path.isfile(path):
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {}
+
+    def _save_export_state(self, state):
+        with open(self._export_statefile(), 'w', encoding='utf-8') as f:
+            json.dump(state, f, indent=2)
+
+    async def _poll_operation(self, case_id, operation_id, label):
+        """Poll a case operation until it reaches a terminal state. Returns the final operation dict."""
+        url = '%s%s/%s/operations/%s' % (self.get_url(), EDISCOVERY_CASES_PATH, case_id, operation_id)
+        for attempt in range(EXPORT_POLL_MAX_ATTEMPTS):
+            self.ensure_token()
+            op = await self._get_json(url)
+            status = (op or {}).get('status', 'unknown')
+            self.logger.info('eDiscovery %s operation %s: %s (%d/%d)' % (label, operation_id, status, attempt + 1, EXPORT_POLL_MAX_ATTEMPTS))
+            if status in ('succeeded', 'failed', 'partiallySucceeded'):
+                return op
+            await asyncio.sleep(EXPORT_POLL_INTERVAL_SECONDS)
+        self.logger.warning('eDiscovery %s operation %s did not complete within the polling window.' % (label, operation_id))
+        return await self._get_json(url)
+
+    async def _create_or_reuse_case(self, state):
+        """Create a new UntitledGooseTool export case, or reuse one recorded in save state."""
+        if state.get('caseId') and not self.force_repull:
+            self.logger.info('Reusing eDiscovery export case %s from save state.' % state['caseId'])
+            return state['caseId']
+        display_name = '%s-%s' % (self.export_case_name, datetime.now().strftime('%Y%m%dT%H%M%SZ'))
+        status, payload, _ = await self._post_json(
+            self.get_url() + EDISCOVERY_CASES_PATH,
+            {'displayName': display_name, 'description': 'Automated export created by Untitled Goose Tool.'})
+        if payload and payload.get('id'):
+            self.logger.info('Created eDiscovery export case %s (%s).' % (display_name, payload['id']))
+            state['caseId'] = payload['id']
+            state['caseDisplayName'] = display_name
+            self._save_export_state(state)
+            return payload['id']
+        self.logger.error('Failed to create eDiscovery export case (status=%s): %s' % (status, payload))
+        return None
+
+    async def _add_custodians(self, case_id, state):
+        """Add custodians for each configured target UPN. Returns True if custodians exist."""
+        if state.get('custodiansAdded'):
+            return True
+        ok = False
+        for upn in self.export_targets:
+            status, payload, _ = await self._post_json(
+                '%s%s/%s/custodians' % (self.get_url(), EDISCOVERY_CASES_PATH, case_id),
+                {'email': upn, 'applyHoldToSources': False})
+            if payload and payload.get('id'):
+                self.logger.info('Added custodian %s to export case.' % upn)
+                ok = True
+            else:
+                self.logger.error('Failed to add custodian %s (status=%s): %s' % (upn, status, payload))
+        state['custodiansAdded'] = ok
+        self._save_export_state(state)
+        return ok
+
+    def _content_query_and_scope(self, content_type):
+        """Resolve the KQL content query and dataSourceScope for a content type, honoring targets/overrides."""
+        default_query, tenant_scope = EXPORT_CONTENT_TYPES[content_type]
+        query = self.export_content_query or default_query
+        # Targeted mailbox scoping via custodians; SharePoint site targeting is a follow-up (oz3.4.2).
+        if self.export_targets and content_type != 'sharepoint':
+            scope = 'allCaseCustodians'
+        else:
+            scope = tenant_scope
+        return query, scope
+
+    async def _download_export(self, operation, content_type):
+        """Download an export package's files (exportFileMetadata[].downloadUrl) to disk."""
+        files = (operation or {}).get('exportFileMetadata') or []
+        if not files:
+            self.logger.info('No exportFileMetadata download URLs for %s export.' % content_type)
+            return []
+        dest_dir = os.path.join(self.output_dir, 'export', content_type)
+        os.makedirs(dest_dir, exist_ok=True)
+        downloaded = []
+        for meta in files:
+            file_name = meta.get('fileName') or 'export.bin'
+            download_url = meta.get('downloadUrl')
+            if not download_url:
+                continue
+            out_path = os.path.join(dest_dir, file_name)
+            try:
+                # Download URLs are pre-authenticated (SAS); no auth header needed.
+                async with self.ahsession.get(download_url, timeout=3600) as r:
+                    with open(out_path, 'wb') as f:
+                        async for chunk in r.content.iter_chunked(1 << 20):
+                            f.write(chunk)
+                self.logger.info('Downloaded %s export file to %s' % (content_type, out_path))
+                downloaded.append(out_path)
+            except Exception as e:
+                self.logger.error('Failed to download %s export file %s: %s' % (content_type, file_name, str(e)))
+        return downloaded
+
+    async def _export_one_content_type(self, case_id, content_type, state):
+        """Create a search, estimate it, export it, poll, and (optionally) download for one content type."""
+        searches = state.setdefault('searches', {})
+        entry = searches.setdefault(content_type, {})
+
+        query, scope = self._content_query_and_scope(content_type)
+
+        # 1. Create the search (skip if already recorded in save state).
+        if not entry.get('searchId'):
+            body = {
+                'displayName': 'UGT-%s-%s' % (content_type, datetime.now().strftime('%Y%m%dT%H%M%SZ')),
+                'description': 'Untitled Goose Tool %s export.' % content_type,
+                'dataSourceScopes': scope,
+            }
+            if query:
+                body['contentQuery'] = query
+            status, payload, _ = await self._post_json(
+                '%s%s/%s/searches' % (self.get_url(), EDISCOVERY_CASES_PATH, case_id), body)
+            if not (payload and payload.get('id')):
+                self.logger.error('Failed to create %s search (status=%s): %s' % (content_type, status, payload))
+                return entry
+            entry['searchId'] = payload['id']
+            self._save_export_state(state)
+            self.logger.info('Created %s search %s (scope=%s, query=%r).' % (content_type, entry['searchId'], scope, query))
+
+        search_base = '%s%s/%s/searches/%s' % (self.get_url(), EDISCOVERY_CASES_PATH, case_id, entry['searchId'])
+
+        # 2. Estimate statistics (exportResult exports from an estimated search).
+        if not entry.get('estimated'):
+            status, payload, location = await self._post_json(search_base + '/estimateStatistics', {})
+            op_id = _operation_id_from(payload, location)
+            if op_id:
+                op = await self._poll_operation(case_id, op_id, '%s estimate' % content_type)
+                entry['estimated'] = (op or {}).get('status') in ('succeeded', 'partiallySucceeded')
+            else:
+                self.logger.error('Failed to start %s estimate (status=%s): %s' % (content_type, status, payload))
+            self._save_export_state(state)
+
+        # 3. Export the search results.
+        if not entry.get('exportOperationId'):
+            body = {
+                'displayName': 'UGT-%s-export' % content_type,
+                'exportCriteria': 'searchHits',
+                'additionalOptions': 'none',
+                'exportFormat': self.export_format,
+            }
+            status, payload, location = await self._post_json(search_base + '/exportResult', body)
+            op_id = _operation_id_from(payload, location)
+            if not op_id:
+                self.logger.error('Failed to start %s export (status=%s): %s' % (content_type, status, payload))
+                return entry
+            entry['exportOperationId'] = op_id
+            self._save_export_state(state)
+
+        # 4. Poll the export operation and optionally download the package.
+        op = await self._poll_operation(case_id, entry['exportOperationId'], '%s export' % content_type)
+        entry['exportStatus'] = (op or {}).get('status')
+        if self.export_download and entry['exportStatus'] in ('succeeded', 'partiallySucceeded'):
+            entry['downloadedFiles'] = await self._download_export(op, content_type)
+        self._save_export_state(state)
+        return entry
+
+    async def dump_ediscovery_export(self):
+        """Orchestrate an eDiscovery content export (WRITES objects to the tenant).
+
+        Pipeline: create (or reuse) an UntitledGooseTool-<timestamp> case -> optionally add
+        custodians for targeted UPNs -> for each configured content type create a search,
+        estimate it, export the results, poll to completion, and download the package(s) to
+        output/ediscovery/export/<content_type>/. Progress is checkpointed to a save-state
+        file so an interrupted run resumes.
+
+        HARD SAFETY GATE: because this creates cases/searches/exports in the tenant, it is a
+        no-op unless [variables] ediscovery_export_confirm=true. Under --dry-run this method
+        is never invoked (honk substitutes the dry-run dumper).
+
+        Options (in [variables]): ediscovery_export_confirm, ediscovery_export_content_types,
+        ediscovery_export_targets, ediscovery_case_name, ediscovery_export_format,
+        ediscovery_export_download, ediscovery_content_query.
+
+        API Reference:
+        https://learn.microsoft.com/en-us/graph/api/security-ediscoverysearch-exportresult?view=graph-rest-1.0
+        """
+        if 'token_type' not in self.app_auth or 'access_token' not in self.app_auth:
+            self.logger.error('Missing token from auth. Skipping dump_ediscovery_export.')
+            return
+        self.ensure_token()
+
+        if not self.export_confirm:
+            self.logger.warning('eDiscovery export is a tenant-WRITING operation and is disabled. '
+                                'Set [variables] ediscovery_export_confirm=true to enable it. Skipping.')
+            return
+
+        unknown = [c for c in self.export_content_types if c not in EXPORT_CONTENT_TYPES]
+        if unknown:
+            self.logger.warning('Ignoring unknown eDiscovery export content types: %s' % ', '.join(unknown))
+        content_types = [c for c in self.export_content_types if c in EXPORT_CONTENT_TYPES]
+        if not content_types:
+            self.logger.error('No valid eDiscovery export content types configured. Skipping.')
+            return
+
+        state = self._load_export_state()
+        case_id = await self._create_or_reuse_case(state)
+        if not case_id:
+            return
+
+        if self.export_targets:
+            self.logger.info('eDiscovery export targeting custodians: %s' % ', '.join(self.export_targets))
+            await self._add_custodians(case_id, state)
+        else:
+            self.logger.info('eDiscovery export scope: tenant-wide (no targets configured).')
+
+        for content_type in content_types:
+            self.logger.info('Starting eDiscovery export for content type: %s' % content_type)
+            await self._export_one_content_type(case_id, content_type, state)
+
+        # Write a manifest summarizing the export for the collection output.
+        self._write_records('ediscovery_export_manifest', [state])
+        self.logger.info('Finished eDiscovery export orchestration for case %s.' % case_id)
 
     @requires_auth
     async def dump_ediscovery_review_set_queries(self):
