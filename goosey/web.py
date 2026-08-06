@@ -210,9 +210,11 @@ def get_dump_methods():
         from goosey.entra_id_datadumper import EntraIdDataDumper
         from goosey.azure_dumper import AzureDataDumper
         from goosey.mde_datadumper import MDEDataDumper
+        from goosey.ediscovery_datadumper import EdiscoveryDataDumper
 
         for name, cls in [("m365", M365DataDumper), ("entraid", EntraIdDataDumper),
-                          ("azure", AzureDataDumper), ("mde", MDEDataDumper)]:
+                          ("azure", AzureDataDumper), ("mde", MDEDataDumper),
+                          ("ediscovery", EdiscoveryDataDumper)]:
             methods[name] = []
             for attr in sorted(dir(cls)):
                 if attr.startswith("dump_"):

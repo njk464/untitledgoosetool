@@ -58,12 +58,32 @@ Untitled Goose Tool (Goosey) is a CISA-published hunt and incident response tool
 | 2026-03-24 | DEC-HUNT-002 | hunting-queries | Static JSON catalog file (goosey/data/hunting_queries.json) | Consistent with sourcetypes.json pattern; JSON handles multi-line strings and nested arrays better than TOML |
 | 2026-03-24 | DEC-HUNT-003 | hunting-queries | Embed in Browse Data tab, not a new top-level tab | Queries operate on collected data already navigated in Browse; reuses existing HQL editor |
 | 2026-03-24 | DEC-HUNT-004 | hunting-queries | Query-to-file resolution via target_files glob matching | Reuses browse tree infrastructure; handles single/multi/no file cases gracefully |
+| 2026-07-09 | DEC-EDISC-001 | ediscovery | Use the Graph eDiscovery API (v1.0 GA) via the graph_api app-only token | Native REST fits the datadumper pattern; first-class Teams/Copilot support. App-only implies E5. |
+| 2026-07-09 | DEC-EDISC-002 | ediscovery | Copilot logs via BOTH aiInteractionHistory (read-only) AND the eDiscovery export pipeline | aiInteractionHistory returns structured prompt/response JSON read-only (non-invasive); eDiscovery search covers it in the unified export flow |
+| 2026-07-09 | DEC-EDISC-003 | ediscovery | Content export as a single resumable orchestrator, double-gated (toggle off + ediscovery_export_confirm) | Export WRITES to the tenant; a hard confirm gate + dry-run safety prevents accidental case creation. Sequential pipeline avoids racy shared-case creation. |
+| 2026-07-09 | DEC-EDISC-004 | ediscovery | Targeted export via custodians (allCaseCustodians); tenant-wide (allTenantMailboxes/Sites) as default | Matches "targeted, default all"; custodian sources are the simplest reliable targeting path |
 
 ---
 
 ## Active Initiatives
 
-_None._ Next initiative TBD — propose via Planner.
+### ediscovery — Microsoft Purview eDiscovery collection module
+
+New `EdiscoveryDataDumper` at the same level as m365/azure/entraid/mde, tracked in beads under epic `untitledgoosetool-oz3`.
+
+**Delivered (on `feature/ediscovery`):**
+- Scaffold + honk/parse_config/conf/CLI wiring; `eDiscovery.*` + `AiEnterpriseInteraction.Read.All` setup permissions
+- Phase 1 snapshot (read-only): 10 dump methods across cases and case children
+- Copilot interactions (read-only) via `aiInteractionHistory`
+- Phase 2 content export (read/write, opt-in, resumable, double-gated)
+- Docs (DATADUMPERS.md, CHANGELOG, this plan)
+
+- Web UI: eDiscovery collection card + `--ediscovery` override
+- Targeted SharePoint/OneDrive site sources (`oz3.4.2`) and grounded Copilot item-class query (`oz3.4.1`)
+
+**Status:** All beads under epic `oz3` closed. Delivered on branch `feature/ediscovery` — pending review/merge to `develop`.
+
+Decisions: DEC-EDISC-001..004.
 
 ---
 

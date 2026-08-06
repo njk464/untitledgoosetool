@@ -14,6 +14,7 @@ from goosey.utils import *
 
 from goosey.entra_id_datadumper import EntraIdDataDumper
 from goosey.d4iot_dumper import DefenderIoTDumper
+from goosey.ediscovery_datadumper import EdiscoveryDataDumper
 from goosey.m365_datadumper import M365DataDumper
 from goosey.azure_dumper import AzureDataDumper
 from goosey.mde_datadumper import MDEDataDumper
@@ -71,10 +72,19 @@ def genconf(outpath_auth=".auth",
             variable_ual_object_ids=None,
             variable_mde_threshold=10000,
             variable_mde_query_mode="table",
+            variable_ediscovery_export_confirm=False,
+            variable_ediscovery_export_content_types="email,teams,copilot,sharepoint",
+            variable_ediscovery_export_targets=None,
+            variable_ediscovery_export_site_targets=None,
+            variable_ediscovery_case_name="UntitledGooseTool",
+            variable_ediscovery_export_format="pst",
+            variable_ediscovery_export_download=True,
+            variable_ediscovery_content_query=None,
             azure=False,
             entraid=False,
             m365=False,
             mde=False,
+            ediscovery=False,
             outpath_d4iotauth=".auth_d4iot",
             outpath_d4iotconf=".d4iot_conf",
             d4iotauth_username=None,
@@ -117,10 +127,19 @@ def genconf(outpath_auth=".auth",
         variable_ual_object_ids: Filter UAL by object ID. Comma-separated list of object identifiers (e.g. file paths, site URLs, user accounts)
         variable_mde_threshold: Threshold for how many logs to pull per query. Usually want to try to max this out as KQL queries are rate limited.
         variable_mde_query_mode: can be either 'table' or 'machine'. 'table' will pull directly from the mde tables without filtering. While 'machine' will filter by 'machine' with large tenants 'machine' will likely be prefered as time bounding on the entire table will likely cause issues.
+        variable_ediscovery_export_confirm: HARD SAFETY GATE for the eDiscovery content export (dump_ediscovery_export). That method CREATES a case, searches, and exports in your tenant. It is a no-op unless this is set to true.
+        variable_ediscovery_export_content_types: Comma-separated content types to export via eDiscovery. Options: email, teams, copilot, sharepoint.
+        variable_ediscovery_export_targets: Comma-separated custodian UPNs/emails to target the mailbox export (email/Teams/Copilot) (e.g. user@contoso.com). Leave empty for a tenant-wide export (all mailboxes).
+        variable_ediscovery_export_site_targets: Comma-separated SharePoint/OneDrive site URLs to target the SharePoint export (e.g. https://contoso.sharepoint.com/sites/X). Leave empty for a tenant-wide export (all sites).
+        variable_ediscovery_case_name: Display-name prefix for the eDiscovery export case Goosey creates (a timestamp is appended).
+        variable_ediscovery_export_format: Export format for exported emails. Options: pst, msg.
+        variable_ediscovery_export_download: Whether to download the export package(s) to output/ediscovery/export/ after the export completes.
+        variable_ediscovery_content_query: Optional KQL content query override applied to all export searches. Leave empty to use the per-content-type defaults.
         azure: Enable all azure log collection
         entraid: Enable all entraid log collection
         m365: Enable all m365 log collection
         mde: Enable all mde log collection
+        ediscovery: Enable all eDiscovery log collection
         outpath_d4iotauth: Path to output the d4iot auth config
         outpath_d4iotconf: Path to output the d4iot goose config
         d4iotauth_username: Username for your D4IoT sensor login page
@@ -190,7 +209,8 @@ def genconf(outpath_auth=".auth",
     dumpers = {"azure": AzureDataDumper,
                "entraid": EntraIdDataDumper,
                "m365": M365DataDumper,
-               "mde": MDEDataDumper}
+               "mde": MDEDataDumper,
+               "ediscovery": EdiscoveryDataDumper}
     # Go through each data dumper and generate the config values for each dump method
     for section_name, section_func in dumpers.items():
         func_args = {}

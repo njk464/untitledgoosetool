@@ -13,6 +13,7 @@ All output is written as JSONL (one JSON object per line) unless otherwise noted
 - [Microsoft Defender for Endpoint (MDE)](#microsoft-defender-for-endpoint-mde)
 - [Azure](#azure)
 - [Defender for IoT (D4IoT) — Sensor & Management Console](#defender-for-iot-d4iot--sensor--management-console)
+- [eDiscovery (Microsoft Purview)](#ediscovery-microsoft-purview)
 
 ---
 
@@ -382,11 +383,74 @@ Base URL: `https://{mgmt_ip}/external/`
 
 ---
 
+## eDiscovery (Microsoft Purview)
+
+**Class:** `EdiscoveryDataDumper` (`goosey/ediscovery_datadumper.py`)
+**Auth token:** `graph_api` (Microsoft Graph)
+**Base URL:** `https://graph.microsoft.com/v1.0/`
+**Output directory:** `output/ediscovery/`
+**Config section:** `[ediscovery]`
+**Graph permissions:** `eDiscovery.Read.All` (snapshot), `eDiscovery.ReadWrite.All` (export), `AiEnterpriseInteraction.Read.All` (Copilot)
+
+> **Optional permissions:** These are **not** granted by the default setup. Add them by running setup with the eDiscovery option:
+> - Python: `goosey setup --app_name GooseApp --create --ediscovery`
+> - PowerShell: `./scripts/Create_SP.ps1 -AppName GooseApp -Create -Ediscovery`
+> - Web UI: check **"Add eDiscovery permissions"** on the Setup tab.
+>
+> **Licensing:** Goosey authenticates to Graph app-only (client credentials). App-only eDiscovery access requires an **E5** / eDiscovery add-on subscription (it is not available on E3, which requires delegated auth). The Copilot interaction API requires a Copilot license and is available in the **Global cloud only** (not GCC/GCC High).
+
+### Snapshot (read-only) — existing eDiscovery objects
+
+Each method enumerates cases, then fetches the case-scoped children. Records are flattened to JSONL and enriched with `caseId` / `caseDisplayName` (plus `reviewSetId` for review set queries).
+
+| Config Key | Method | API Endpoint | Output File |
+|---|---|---|---|
+| `ediscovery_cases` | `dump_ediscovery_cases()` | `GET /security/cases/ediscoveryCases` | `ediscovery_cases.json` |
+| `ediscovery_case_settings` | `dump_ediscovery_case_settings()` | `GET .../ediscoveryCases/{id}/settings` | `ediscovery_case_settings.json` |
+| `ediscovery_custodians` | `dump_ediscovery_custodians()` | `GET .../{id}/custodians` | `ediscovery_custodians.json` |
+| `ediscovery_noncustodial_sources` | `dump_ediscovery_noncustodial_sources()` | `GET .../{id}/noncustodialDataSources` | `ediscovery_noncustodial_sources.json` |
+| `ediscovery_searches` | `dump_ediscovery_searches()` | `GET .../{id}/searches` | `ediscovery_searches.json` |
+| `ediscovery_holds` | `dump_ediscovery_holds()` | `GET .../{id}/legalHolds` | `ediscovery_holds.json` |
+| `ediscovery_review_sets` | `dump_ediscovery_review_sets()` | `GET .../{id}/reviewSets` | `ediscovery_review_sets.json` |
+| `ediscovery_review_set_queries` | `dump_ediscovery_review_set_queries()` | `GET .../{id}/reviewSets/{rsId}/queries` | `ediscovery_review_set_queries.json` |
+| `ediscovery_tags` | `dump_ediscovery_tags()` | `GET .../{id}/tags` | `ediscovery_tags.json` |
+| `ediscovery_operations` | `dump_ediscovery_operations()` | `GET .../{id}/operations` | `ediscovery_operations.json` |
+
+### Copilot interactions (read-only)
+
+| Config Key | Method | API Endpoint | Output File |
+|---|---|---|---|
+| `copilot_interactions` | `dump_copilot_interactions()` | `GET /copilot/users/{id}/interactionHistory/getAllEnterpriseInteractions` (per user) | `copilot_interactions.json` |
+
+Enumerates users, then fetches each user's Copilot prompts/responses via the dedicated `aiInteractionHistory` API. Bounded by the configured date range (`createdDateTime` `$filter`) and enriched with `userId` / `userPrincipalName`. Global cloud only; users without a Copilot license are skipped.
+
+### Content export (read/write — creates objects in the tenant)
+
+| Config Key | Method | Output |
+|---|---|---|
+| `ediscovery_export` | `dump_ediscovery_export()` | `ediscovery_export_manifest.json`, `export/{content_type}/*` |
+
+Sequential, resumable pipeline: create (or reuse) an `UntitledGooseTool-<timestamp>` case → optionally add custodians for targeted UPNs → for each content type create a search, run `estimateStatistics`, `exportResult`, poll the operation, and download the package(s). **Double-gated:** the `ediscovery_export` toggle is off by default, and the method is a hard no-op unless `[variables] ediscovery_export_confirm=true`. Never runs under `--dry-run`. Progress is checkpointed to `.ediscovery_export.savestate`.
+
+Configured via `[variables]`:
+
+| Variable | Default | Description |
+|---|---|---|
+| `ediscovery_export_confirm` | `false` | HARD safety gate — must be `true` for any export to run |
+| `ediscovery_export_content_types` | `email,teams,copilot,sharepoint` | Content types to export |
+| `ediscovery_export_targets` | *(empty)* | Custodian UPNs to target; empty = tenant-wide |
+| `ediscovery_case_name` | `UntitledGooseTool` | Case display-name prefix (timestamp appended) |
+| `ediscovery_export_format` | `pst` | Email export format (`pst`/`msg`) |
+| `ediscovery_export_download` | `true` | Download the export package(s) after completion |
+| `ediscovery_content_query` | *(empty)* | Optional KQL override applied to all export searches |
+
+---
+
 ## Authentication Tokens
 
 | Token Key | Scope | Used By |
 |---|---|---|
-| `graph_api` | Microsoft Graph | EntraIdDataDumper, M365DataDumper |
+| `graph_api` | Microsoft Graph | EntraIdDataDumper, M365DataDumper, EdiscoveryDataDumper |
 | `outlook_office_api` | Exchange Online | M365DataDumper (EXO cmdlets) |
 | `resource_manager` | Azure Resource Manager | AzureDataDumper |
 | `log_analytics_api` | Log Analytics | AzureDataDumper (LAW queries) |

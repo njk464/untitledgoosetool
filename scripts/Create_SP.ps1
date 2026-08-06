@@ -10,6 +10,9 @@
 .EXAMPLE
 	Write-Host "Deleting a previously created Goose Application"
 	PS > ./Create_SP.ps1 -AppName GooseApp -Delete
+.EXAMPLE
+	Write-Host "Creating a Goose Application with the optional eDiscovery permissions (requires E5)"
+	PS > ./Create_SP.ps1 -AppName GooseApp -Create -Ediscovery
 #>
 
 [cmdletbinding()]Param(
@@ -19,6 +22,7 @@
 	,[switch] $Force=$False # Boolean flag on whether to Force deletion or creation without prompting
 	,[switch] $NoSubscriptions=$False # Boolean flag on whether to not apply subscription level roles
 	,[switch] $GccHigh=$False # Boolean flag on whether to set it up for a Gcc High Environment
+	,[switch] $Ediscovery=$False # Boolean flag on whether to also grant the optional eDiscovery/Copilot Graph permissions (requires E5)
 )
 
 $script:UserNames = @()
@@ -77,6 +81,29 @@ $permissions = @{
 		"User.Read.All",
 		"UserAuthenticationMethod.Read.All"
 	)
+}
+
+# Optional eDiscovery permissions, added to $permissions only when -Ediscovery is
+# passed. Opt-in because collecting eDiscovery data through Goosey (app-only auth)
+# requires an E5 / eDiscovery add-on subscription, and the Copilot interaction API
+# additionally requires a Copilot license and is Global-cloud only.
+$ediscovery_permissions = @{
+	"Microsoft Graph" = @(
+		"eDiscovery.Read.All",
+		"eDiscovery.ReadWrite.All",
+		"AiEnterpriseInteraction.Read.All"
+	)
+}
+
+if ($Ediscovery) {
+	Write-Host "Including optional eDiscovery/Copilot Graph permissions."
+	foreach ($scope in $ediscovery_permissions.Keys) {
+		if ($permissions.ContainsKey($scope)) {
+			$permissions[$scope] += $ediscovery_permissions[$scope]
+		} else {
+			$permissions[$scope] = $ediscovery_permissions[$scope]
+		}
+	}
 }
 
 $app_roles = @(

@@ -449,6 +449,10 @@
                       <label class="form-check-label small" for="setup-no-subs">Skip subscription roles</label>
                     </div>
                     <div class="form-check">
+                      <input class="form-check-input" type="checkbox" id="setup-ediscovery">
+                      <label class="form-check-label small" for="setup-ediscovery">Add eDiscovery permissions (requires E5)</label>
+                    </div>
+                    <div class="form-check">
                       <input class="form-check-input" type="checkbox" id="setup-insecure">
                       <label class="form-check-label small" for="setup-insecure">Write .auth as plaintext (no encryption)</label>
                     </div>
@@ -652,6 +656,7 @@
                 <div class="col-6"><div class="form-check"><input class="form-check-input" type="checkbox" id="honk-entraid"><label class="form-check-label" for="honk-entraid">Entra ID</label></div></div>
                 <div class="col-6"><div class="form-check"><input class="form-check-input" type="checkbox" id="honk-azure"><label class="form-check-label" for="honk-azure">Azure</label></div></div>
                 <div class="col-6"><div class="form-check"><input class="form-check-input" type="checkbox" id="honk-mde"><label class="form-check-label" for="honk-mde">MDE</label></div></div>
+                <div class="col-6"><div class="form-check"><input class="form-check-input" type="checkbox" id="honk-ediscovery"><label class="form-check-label" for="honk-ediscovery">eDiscovery</label></div></div>
               </div>
 
               <div class="section-title mt-3">Options</div>
@@ -925,6 +930,7 @@ function runSetup() {
   else args.push('--delete');
   if (document.getElementById('setup-gcc-high').checked) args.push('--gcc_high');
   if (document.getElementById('setup-no-subs').checked) args.push('--no_subscriptions');
+  if (document.getElementById('setup-ediscovery').checked) args.push('--ediscovery');
   if (document.getElementById('setup-insecure').checked) args.push('--insecure');
   if (document.getElementById('setup-force').checked) args.push('--force');
 
@@ -995,7 +1001,7 @@ function loadConf() {
 function renderDumpMethods(methods, conf) {
   const container = document.getElementById('dump-methods-container');
   container.innerHTML = '';
-  const platformNames = {m365: 'M365 / Exchange Online', entraid: 'Entra ID', azure: 'Azure', mde: 'Microsoft Defender for Endpoint'};
+  const platformNames = {m365: 'M365 / Exchange Online', entraid: 'Entra ID', azure: 'Azure', mde: 'Microsoft Defender for Endpoint', ediscovery: 'eDiscovery (Purview)'};
   for (const [platform, items] of Object.entries(methods)) {
     const card = document.createElement('div');
     card.className = 'card mb-3';
@@ -1269,6 +1275,7 @@ function runCollect() {
   if (c('honk-entraid')) args.push('--entraid');
   if (c('honk-azure')) args.push('--azure');
   if (c('honk-mde')) args.push('--mde');
+  if (c('honk-ediscovery')) args.push('--ediscovery');
   if (c('honk-force_repull')) args.push('--force_repull');
   if (c('honk-dry_run')) args.push('--dry_run');
   if (c('honk-insecure')) args.push('--insecure');
