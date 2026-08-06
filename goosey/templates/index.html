@@ -449,6 +449,10 @@
                       <label class="form-check-label small" for="setup-no-subs">Skip subscription roles</label>
                     </div>
                     <div class="form-check">
+                      <input class="form-check-input" type="checkbox" id="setup-ediscovery">
+                      <label class="form-check-label small" for="setup-ediscovery">Add eDiscovery permissions (requires E5)</label>
+                    </div>
+                    <div class="form-check">
                       <input class="form-check-input" type="checkbox" id="setup-insecure">
                       <label class="form-check-label small" for="setup-insecure">Write .auth as plaintext (no encryption)</label>
                     </div>
@@ -926,6 +930,7 @@ function runSetup() {
   else args.push('--delete');
   if (document.getElementById('setup-gcc-high').checked) args.push('--gcc_high');
   if (document.getElementById('setup-no-subs').checked) args.push('--no_subscriptions');
+  if (document.getElementById('setup-ediscovery').checked) args.push('--ediscovery');
   if (document.getElementById('setup-insecure').checked) args.push('--insecure');
   if (document.getElementById('setup-force').checked) args.push('--force');
 

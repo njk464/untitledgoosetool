@@ -68,21 +68,12 @@ PERMISSIONS = {
     ],
     "Microsoft Graph": [
         "AdministrativeUnit.Read.All",
-        # Copilot interaction export (aiInteractionHistory:getAllEnterpriseInteractions).
-        # Application permission only; requires a Copilot license and is Global-cloud only.
-        "AiEnterpriseInteraction.Read.All",
         "APIConnectors.Read.All",
         "AuditLog.Read.All",
         "AuditLogsQuery.Read.All",
         "ConsentRequest.Read.All",
         "Directory.Read.All",
         "Domain.Read.All",
-        # eDiscovery: Read.All for the read-only snapshot dumpers; ReadWrite.All for
-        # Phase 2 content export (create case/search, add-to-review-set, export/download).
-        # Goosey authenticates to Graph app-only (client credentials), and app-only
-        # eDiscovery access requires an E5 / eDiscovery add-on subscription.
-        "eDiscovery.Read.All",
-        "eDiscovery.ReadWrite.All",
         "ExternalUserProfile.Read.All",
         "Group.Read.All",
         "IdentityProvider.Read.All",
@@ -104,6 +95,22 @@ PERMISSIONS = {
         "ThreatHunting.Read.All",
         "User.Read.All",
         "UserAuthenticationMethod.Read.All",
+    ],
+}
+
+# Optional eDiscovery permissions, assigned only when setup is run with the
+# eDiscovery option (setup --ediscovery). These are opt-in because collecting
+# eDiscovery data through Goosey (app-only auth) requires an E5 / eDiscovery
+# add-on subscription, and the Copilot interaction API additionally requires a
+# Copilot license and is Global-cloud only.
+EDISCOVERY_PERMISSIONS = {
+    "Microsoft Graph": [
+        # eDiscovery: Read.All for the read-only snapshot dumpers; ReadWrite.All for
+        # Phase 2 content export (create case/search, add-to-review-set, export/download).
+        "eDiscovery.Read.All",
+        "eDiscovery.ReadWrite.All",
+        # Copilot interaction export (aiInteractionHistory:getAllEnterpriseInteractions).
+        "AiEnterpriseInteraction.Read.All",
     ],
 }
 
@@ -288,7 +295,20 @@ class ExchangeClient:
         return result
 
 
-def create_app(graph, app_name, subscriptions_used, env, credential=None, gcc_high=False):
+def _merge_permissions(base, extra):
+    """Return a new permissions dict merging `extra` role lists into `base` by resource.
+
+    Neither input is mutated; role lists are copied so callers can't corrupt the
+    module-level PERMISSIONS/EDISCOVERY_PERMISSIONS constants.
+    """
+    merged = {resource: list(perms) for resource, perms in base.items()}
+    for resource, perms in extra.items():
+        merged.setdefault(resource, [])
+        merged[resource].extend(perms)
+    return merged
+
+
+def create_app(graph, app_name, subscriptions_used, env, credential=None, gcc_high=False, include_ediscovery=False):
     """Create the Entra ID app registration, service principal, permissions, and roles.
 
     Args:
@@ -300,7 +320,10 @@ def create_app(graph, app_name, subscriptions_used, env, credential=None, gcc_hi
             If None and subscriptions_used is non-empty, a new InteractiveBrowserCredential
             is created (legacy fallback — prefer passing credential for auth-upfront flow).
         gcc_high: Unused; kept for backwards compatibility.
+        include_ediscovery: When True, also assign the optional eDiscovery/Copilot
+            Graph permissions (EDISCOVERY_PERMISSIONS). Off by default (requires E5).
     """
+    permissions = _merge_permissions(PERMISSIONS, EDISCOVERY_PERMISSIONS) if include_ediscovery else PERMISSIONS
     # 1. Create or get app registration
     app = graph.get_app_by_name(app_name)
     if not app:
@@ -325,7 +348,10 @@ def create_app(graph, app_name, subscriptions_used, env, credential=None, gcc_hi
     existing_assignments = graph.get(f"/servicePrincipals/{sp_id}/appRoleAssignments")
     existing_role_ids = {a["appRoleId"] for a in existing_assignments.get("value", [])}
 
-    for scope_name, perms in PERMISSIONS.items():
+    if include_ediscovery:
+        print("Including optional eDiscovery/Copilot Graph permissions.")
+
+    for scope_name, perms in permissions.items():
         print(f"Assigning permissions for {scope_name}...")
         resource_sp = graph.get_sp_by_name(scope_name)
         if not resource_sp:
@@ -618,6 +644,7 @@ def setup(app_name=None,
           force=False,
           no_subscriptions=False,
           gcc_high=False,
+          ediscovery=False,
           insecure=False,
           outpath_auth=".auth",
           debug=False):
@@ -640,6 +667,9 @@ def setup(app_name=None,
         force: Skip confirmation prompts
         no_subscriptions: Skip Azure subscription role assignments
         gcc_high: Configure for GCC High environment
+        ediscovery: Also grant the optional eDiscovery/Copilot Graph permissions
+            (eDiscovery.Read.All, eDiscovery.ReadWrite.All, AiEnterpriseInteraction.Read.All).
+            Off by default; requires an E5 / eDiscovery add-on subscription.
         insecure: Write .auth as plaintext instead of encrypted .auth.aes
         outpath_auth: Path for the auth config file (default: .auth)
         debug: Enable debug output
@@ -711,7 +741,8 @@ def setup(app_name=None,
             subscriptions_used = choose_subscriptions(azure_credential, force)
 
         app_id, sp_id, client_secret = create_app(
-            graph, app_name, subscriptions_used, env, credential=azure_credential, gcc_high=gcc_high
+            graph, app_name, subscriptions_used, env, credential=azure_credential, gcc_high=gcc_high,
+            include_ediscovery=ediscovery
         )
 
         exo = ExchangeClient(exo_token, env["exo_url"], tenant_id)

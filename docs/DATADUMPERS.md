@@ -392,6 +392,11 @@ Base URL: `https://{mgmt_ip}/external/`
 **Config section:** `[ediscovery]`
 **Graph permissions:** `eDiscovery.Read.All` (snapshot), `eDiscovery.ReadWrite.All` (export), `AiEnterpriseInteraction.Read.All` (Copilot)
 
+> **Optional permissions:** These are **not** granted by the default setup. Add them by running setup with the eDiscovery option:
+> - Python: `goosey setup --app_name GooseApp --create --ediscovery`
+> - PowerShell: `./scripts/Create_SP.ps1 -AppName GooseApp -Create -Ediscovery`
+> - Web UI: check **"Add eDiscovery permissions"** on the Setup tab.
+>
 > **Licensing:** Goosey authenticates to Graph app-only (client credentials). App-only eDiscovery access requires an **E5** / eDiscovery add-on subscription (it is not available on E3, which requires delegated auth). The Copilot interaction API requires a Copilot license and is available in the **Global cloud only** (not GCC/GCC High).
 
 ### Snapshot (read-only) — existing eDiscovery objects

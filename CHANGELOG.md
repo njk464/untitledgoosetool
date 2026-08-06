@@ -8,7 +8,7 @@ All notable changes to this project will be documented in this file.
   - Snapshot (read-only): cases, case settings, custodians, noncustodial data sources, searches, legal holds, review sets, review set queries, tags, and operations
   - Copilot interactions (read-only): per-user prompts/responses via the dedicated `aiInteractionHistory:getAllEnterpriseInteractions` API, date-range bounded
   - Content export (read/write, opt-in): `dump_ediscovery_export` orchestrates create case → search → estimate → export → download for email/Teams/Copilot/SharePoint, resumable via save-state; double-gated behind a toggle and `ediscovery_export_confirm`
-  - Setup grants `eDiscovery.Read.All`, `eDiscovery.ReadWrite.All`, and `AiEnterpriseInteraction.Read.All` Graph permissions
+  - Optional eDiscovery/Copilot Graph permissions (`eDiscovery.Read.All`, `eDiscovery.ReadWrite.All`, `AiEnterpriseInteraction.Read.All`), granted only on request via `goosey setup --ediscovery`, `Create_SP.ps1 -Ediscovery`, or the web UI Setup tab checkbox (off by default; requires E5)
 - Web UI: Device code OAuth login flow for MDE portal auth — automated alternative to manual ESTS cookie entry, with refresh token persistence
 
 ### Fixed
