@@ -4,6 +4,7 @@ Defines package metadata, dependencies, console entry points, and package_data
 (templates and data files shipped with the distribution).
 """
 
+import re
 import sys
 
 from os import path
@@ -14,11 +15,20 @@ if sys.version_info < (3,9):
 elif sys.version_info >= (3,14):
     sys.exit("The current Python version is greater than 3.13. Exiting.")
 
+def read_version():
+    """Single source of truth: parse __version__ from goosey/__init__.py without importing it."""
+    init_path = path.join(path.dirname(path.abspath(__file__)), "goosey", "__init__.py")
+    with open(init_path, encoding="utf-8") as f:
+        match = re.search(r'^__version__\s*=\s*[\'"]([^\'"]+)[\'"]', f.read(), re.M)
+    if not match:
+        sys.exit("Unable to find __version__ in goosey/__init__.py")
+    return match.group(1)
+
 requirements_filepath = path.join(path.dirname(path.abspath(__file__)), "requirements.txt")
 requirements = open(requirements_filepath).read().split()
 
 setup(name='goosey',
-      version='2.0.4',
+      version=read_version(),
       description='EntraID, Azure, M365, MDE Data Collector',
       author='Claire Casalnova, Jordan Eberst, Nicholas Kantor, Wellington Lee, John Phelps, Victoria Wallace',
       classifiers=[

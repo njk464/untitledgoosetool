@@ -16,8 +16,10 @@ Shared utility functions used across all modules:
 """
 
 import asyncio
+import collections
 import configparser
 import functools
+import hashlib
 import darkdetect
 import json
 import logging
@@ -29,7 +31,9 @@ import io
 import pytz
 
 from colored import stylize, attr, fg
-from datetime import datetime, timedelta, date
+from dataclasses import dataclass
+from datetime import datetime, timedelta, date, timezone
+from typing import Optional
 from logging import handlers
 import dateutil.parser
 
@@ -43,6 +47,10 @@ utc = pytz.UTC
 # Constants
 RATE_LIMIT_SLEEP_SECONDS = 60
 KQL_RATE_LIMIT_SLEEP_SECONDS = 30
+# Log Analytics throttling (e.g. "Rate limit of 200 per 30 seconds is exceeded"): retry with backoff
+KQL_THROTTLE_RETRIES = 6
+KQL_THROTTLE_BASE_SLEEP = 5
+KQL_THROTTLE_MAX_SLEEP = 120
 DEFAULT_RETRIES = 50
 HELPER_RETRIES = 5
 DUMP_TABLE_RETRIES = 3
@@ -139,6 +147,15 @@ def setup_logger(name, debug, formatter='cli') -> logging.Logger:
     error_log = "error.log"
 
     logger = logging.getLogger(name)
+    if getattr(logger, "_goosey_console", False) or getattr(logger, "_goosey_configured", False):
+        # Already configured (DataDumper base and subclass both call this for the same module
+        # logger). Re-adding handlers made every message print twice; just refresh levels.
+        logger.setLevel(logging.DEBUG if debug else logging.INFO)
+        for h in logger.handlers:
+            if getattr(h, "_goosey_console", False):
+                h.setLevel(logging.DEBUG if debug else logging.INFO)
+        return logger
+    logger._goosey_configured = True
     format = "%(asctime)s - %(levelname)s - %(message)s (%(filename)s:%(lineno)d)"
     if sys.version_info >= (3,12):
         # taskName key is only available after python 3.12
@@ -168,6 +185,7 @@ def setup_logger(name, debug, formatter='cli') -> logging.Logger:
     # Only add console handler when not in quiet mode, or when debug is explicitly on
     if not _quiet_mode or debug:
         ch = logging.StreamHandler()
+        ch._goosey_console = True
 
         if debug:
             ch.setLevel(logging.DEBUG)
@@ -322,7 +340,7 @@ def check_output_dir(output_dir, logger):
         logger.error(f'{output_dir} exists but is not a directory or you do not have permissions to access. Exiting.')
         sys.exit(1)
 
-async def get_nextlink(url, outfile, session, logger, auth):
+async def get_nextlink(url, outfile, session, logger, auth, dedupe=None):
     """Follow @odata.nextLink pagination to retrieve all pages of a Graph API response.
 
     Microsoft Graph returns paginated results with an @odata.nextLink URL for the next page.
@@ -350,9 +368,12 @@ async def get_nextlink(url, outfile, session, logger, auth):
                 if not skiptoken == '50':
                     logger.debug(f'Received nextLink {skiptoken} {url}')
 
+                if dedupe is not None and isinstance(finalvalue, list):
+                    finalvalue = dedupe.filter(finalvalue)
                 with open(outfile, 'a+', encoding='utf-8') as f:
                     logger.debug(f"Writing to {outfile}")
-                    f.write("\n".join([json.dumps(x) for x in finalvalue]) + '\n')
+                    if finalvalue or dedupe is None:
+                        f.write("\n".join([json.dumps(x) for x in finalvalue]) + '\n')
                     f.flush()
                     os.fsync(f)
                 if '@odata.nextLink' in result2:
@@ -416,7 +437,7 @@ async def run_kql_query(query, start, end, bounds, url, app_auth, logger, sessio
     # Server-side issues — sleep and retry
     sleep_errors = ["Server disconnected", "Cannot connect", "WinError 10054"]
     # Result too large — halve the time range
-    slice_errors = ['exceeded the allowed limits', 'exceeded the allowed result size', 'Rate limit']
+    slice_errors = ['exceeded the allowed limits', 'exceeded the allowed result size']
     # Authentication failures
     auth_errors = ['TokenExpired']
 
@@ -444,32 +465,46 @@ async def run_kql_query(query, start, end, bounds, url, app_auth, logger, sessio
     data=json.dumps(payload)
     result = None
     err = None
-    try:
-        async with session.request("POST", url=url, headers=header, data=data) as r:
-            result = await r.json()
-            if r.status == 401:
-                logger.error("Detected 401 unauthorized. Skipping query.")
-                err = "Unauthorized (401)"
-                result = None
-            elif r.status == 429:
-                error = result['error']
-                message = error['message']
-                logger.debug(message)
-                await asyncio.sleep(KQL_RATE_LIMIT_SLEEP_SECONDS)
-                err = message
-                result = None
-            else:
-                if "error" in result:
-                    err = result["error"]["message"]
-                if "tables" in result:
-                    result = result["tables"]
-                else:
-                    logger.debug(result)
+    for attempt in range(KQL_THROTTLE_RETRIES + 1):
+        result = None
+        err = None
+        retry_after = None
+        throttled = False
+        try:
+            async with session.request("POST", url=url, headers=header, data=data) as r:
+                result = await r.json()
+                retry_after = r.headers.get('Retry-After')
+                if r.status == 401:
+                    logger.error("Detected 401 unauthorized. Skipping query.")
+                    err = "Unauthorized (401)"
                     result = None
-
-    except Exception as e:
-        logger.error('Error on retrieval: {}'.format(str(e)))
-        err = str(e)
+                else:
+                    if "error" in result:
+                        err = result["error"].get("message") or result["error"].get("code") or f"HTTP {r.status}"
+                    elif r.status >= 400:
+                        err = f"HTTP {r.status}"
+                    body_err = result.get("error") if isinstance(result, dict) else None
+                    throttled = r.status == 429 or is_throttle_error(body_err)
+                    if not throttled and "tables" in result:
+                        result = result["tables"]
+                    else:
+                        logger.debug(result)
+                        result = None
+        except Exception as e:
+            # str(e) is empty for TimeoutError and some aiohttp errors; always include the type.
+            err = f"{type(e).__name__}: {e}".rstrip(": ")
+            logger.error('Error on retrieval: {}'.format(err))
+        if throttled and attempt < KQL_THROTTLE_RETRIES:
+            try:
+                delay = float(retry_after)
+            except (TypeError, ValueError):
+                delay = KQL_THROTTLE_BASE_SLEEP * (2 ** attempt)
+            delay = min(delay, KQL_THROTTLE_MAX_SLEEP)
+            logger.info(f'Log Analytics throttled the query; retrying in {delay:g}s '
+                        f'(attempt {attempt + 1}/{KQL_THROTTLE_RETRIES}).')
+            await asyncio.sleep(delay)
+            continue
+        break
 
     results = map_results(result)
 
@@ -489,7 +524,7 @@ async def run_kql_query(query, start, end, bounds, url, app_auth, logger, sessio
                   "done_status": done_status}, bounds)
     if err:
         logger.debug(err)
-    if err is TimeoutError or \
+    if err and err.startswith("TimeoutError") or \
        err and any(e in err for e in slice_errors) or \
        (count and count >= threshold):
        new_end_ts = start.timestamp() + ((end.timestamp() - start.timestamp())/2)
@@ -500,6 +535,19 @@ async def run_kql_query(query, start, end, bounds, url, app_auth, logger, sessio
         logger.error("Authentication token expired during KQL query.")
 
     return results, err, end, bounds
+
+def is_throttle_error(error):
+    """True if a Log Analytics error object/message indicates throttling (HTTP 429 or a body such as
+    "Rate limit of 200 per 30 seconds is exceeded", which may arrive with another status)."""
+    if not error:
+        return False
+    if isinstance(error, dict):
+        text = f"{error.get('code', '')} {error.get('message', '')}"
+    else:
+        text = str(error)
+    text = text.lower()
+    return any(k in text for k in ("rate limit", "throttl", "too many requests", "toomanyrequests"))
+
 
 def map_results(kql_results):
     """
@@ -719,33 +767,254 @@ def get_end_time_yesterday():
     yesterday = datetime.now(utc).date() - timedelta(days=1)
     return utc.localize(datetime.combine(yesterday, datetime.max.time()))
 
-def get_date_range(config, logger=logging):
+@dataclass(frozen=True)
+class DateBounds:
     """
-    Description:
-        Read in the date_start and date_end from the config
+    @decision DEC-DATEBOUNDS-001
+    @title One documented rule for the collection end bound
+    @status accepted
+    @rationale End bounds are exclusive. An explicit date_end=YYYY-MM-DD means
+      exclusive UTC midnight of that date (unchanged). A blank/omitted date_end
+      means a timezone-aware UTC snapshot of "now", captured once per dumper
+      invocation, so same-day collection is neither dropped (old behaviour used
+      the local date, excluding the current UTC day) nor mislabelled. Local time,
+      naive datetimes and "today's date" are never used as a substitute.
 
-    Arguments:
-        config: ConfigParser Object containing the goose config
-
-    Returns:
-        Tuple of (date_range_boolean, date_start, date_end)
+    Resolved collection window. ``start`` is aware-UTC midnight of date_start
+    (or None when no date range is configured); ``end`` is always aware-UTC and
+    exclusive. ``end_is_now`` is True when date_end was blank.
     """
-    date_range = False
-    date_start = False
-    date_end = False
+    start: Optional[datetime]
+    end: datetime
+    end_is_now: bool
 
-    filters = config_get(config, 'filters', 'date_start', logger=logger)
-    if  filters!= '' and filters is not None:
-        date_range=True
-        date_start = config_get(config, 'filters', 'date_start')
-        if config_get(config, 'filters', 'date_end') != '':
-            date_end = config_get(config, 'filters', 'date_end')
+    @property
+    def has_range(self):
+        return self.start is not None
+
+    @property
+    def start_date(self):
+        """date_start as 'YYYY-MM-DD' (date-only APIs) or False."""
+        return self.start.strftime(DATE_FMT) if self.start else False
+
+    @property
+    def end_date(self):
+        """UTC calendar date of ``end`` as 'YYYY-MM-DD'. For a 'now' end this is
+        today's UTC date, so only use it with APIs that need date granularity
+        AND tolerate an over-inclusive upper bound (e.g. daily chunking)."""
+        return self.end.strftime(DATE_FMT)
+
+    def legacy_tuple(self):
+        """(date_range_bool, date_start_str, date_end_str) as get_date_range returned."""
+        return (self.has_range, self.start_date, self.end_date if self.has_range else False)
+
+
+DATE_FMT = "%Y-%m-%d"
+GRAPH_TS_FMT = "%Y-%m-%dT%H:%M:%S.%fZ"
+
+
+def utc_now():
+    """Timezone-aware current UTC time."""
+    return datetime.now(timezone.utc)
+
+
+def to_graph_ts(dt):
+    """Format an aware (or naive-UTC) datetime as YYYY-MM-DDTHH:MM:SS.ffffffZ in UTC."""
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc)
+    return dt.strftime(GRAPH_TS_FMT)
+
+
+def floor_to_day(dt):
+    """Aware-UTC midnight of dt's UTC calendar day."""
+    dt = dt.astimezone(timezone.utc)
+    return datetime.combine(dt.date(), datetime.min.time(), tzinfo=timezone.utc)
+
+
+def to_date_str(dt):
+    """Format a datetime as its UTC calendar date, YYYY-MM-DD."""
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc)
+    return dt.strftime(DATE_FMT)
+
+
+def parse_graph_ts(value):
+    """Parse a Graph-style UTC timestamp (or date) into an aware UTC datetime."""
+    dt = dateutil.parser.parse(value.strip())
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def resolve_date_bounds(config, logger=logging, now=None):
+    """
+    Resolve [filters] date_start/date_end into a DateBounds (see the class docs
+    for the rule). ``now`` (aware datetime) may be injected to freeze time.
+    """
+    now = (now or utc_now())
+    if now.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
+    now = now.astimezone(timezone.utc)
+
+    start_raw = config_get(config, 'filters', 'date_start', logger=logger)
+    if start_raw is None or str(start_raw).strip() == '':
+        return DateBounds(start=None, end=now, end_is_now=True)
+    start = datetime.strptime(str(start_raw).strip(), DATE_FMT).replace(tzinfo=timezone.utc)
+    end_raw = config_get(config, 'filters', 'date_end')
+    if end_raw is None or str(end_raw).strip() == '':
+        return DateBounds(start=start, end=now, end_is_now=True)
+    end = datetime.strptime(str(end_raw).strip(), DATE_FMT).replace(tzinfo=timezone.utc)
+    return DateBounds(start=start, end=end, end_is_now=False)
+
+
+def get_date_range(config, logger=logging, now=None):
+    """
+    Back-compat wrapper returning (date_range_boolean, date_start, date_end) as
+    strings. A blank date_end yields today's UTC date here; new code should use
+    resolve_date_bounds() so the real UTC timestamp is preserved.
+    """
+    return resolve_date_bounds(config, logger, now=now).legacy_tuple()
+
+INCREMENTAL_LOOKBACK_MINUTES = 30
+
+
+def get_incremental_lookback(config, logger=logging):
+    """
+    @decision DEC-LOOKBACK-001
+    @title Re-query a lookback window on resume and de-duplicate the overlap
+    @status accepted
+    @rationale Log sources ingest late: rows with TimeGenerated/createdDateTime before a
+      checkpoint can arrive after the run that wrote it (live: LAW lag p95 ~7 min, max ~19 min;
+      Graph sign-ins missed 1-25 rows). On resume the query therefore restarts at
+      checkpoint - lookback and rows already on disk are skipped (Entra by `id`; LAW by a
+      multiset of canonical-row hashes so genuine source duplicates survive). Checkpoints still
+      equal the resolved end and never exceed it.
+
+    Lookback as a timedelta: [variables] incremental_lookback_minutes, default 30.
+    """
+    minutes = INCREMENTAL_LOOKBACK_MINUTES
+    try:
+        if config.has_option('variables', 'incremental_lookback_minutes'):
+            raw = str(config.get('variables', 'incremental_lookback_minutes')).strip()
+            if raw:
+                value = float(raw)
+                if value < 0:
+                    raise ValueError("negative")
+                minutes = value
+    except Exception:
+        logger.warning(f"Invalid [variables] incremental_lookback_minutes; using {INCREMENTAL_LOOKBACK_MINUTES}.")
+    return timedelta(minutes=minutes)
+
+
+class IdDedupe:
+    """Skip records whose ``id`` was already written (overlap re-fetches, retried pages).
+    Records without an id are always kept. Pass ``path`` to pre-load ids from an existing
+    JSON-lines artifact."""
+
+    def __init__(self, path=None):
+        self.seen = set()
+        self.skipped = 0
+        if path and os.path.isfile(path):
+            with open(path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rid = json.loads(line).get('id')
+                    except (ValueError, AttributeError):
+                        continue
+                    if rid is not None:
+                        self.seen.add(rid)
+
+    def filter(self, rows):
+        out = []
+        for row in rows:
+            rid = row.get('id') if isinstance(row, dict) else None
+            if rid is not None:
+                if rid in self.seen:
+                    self.skipped += 1
+                    continue
+                self.seen.add(rid)
+            out.append(row)
+        return out
+
+
+def _parse_row_ts(value):
+    """Parse a TimeGenerated value to an aware-UTC datetime, or None."""
+    if not isinstance(value, str):
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except ValueError:
+        try:
+            dt = dateutil.parser.parse(value)
+        except (ValueError, OverflowError):
+            return None
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+
+
+def row_fingerprint(row):
+    """sha256 of the canonical (sorted-key) JSON of a collected row."""
+    return hashlib.sha256(json.dumps(row, sort_keys=True, default=str).encode('utf-8')).hexdigest()
+
+
+def load_row_multiset(path, since):
+    """
+    Multiset (Counter) of row fingerprints already in a JSON-lines artifact whose TimeGenerated
+    is >= ``since``. Streams the file. A multiset (not a set) is used so genuine duplicate rows
+    in the source are preserved: a re-fetched copy cancels exactly one stored copy.
+    """
+    counts = collections.Counter()
+    if not os.path.isfile(path):
+        return counts
+    with open(path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            ts = _parse_row_ts(row.get('TimeGenerated')) if isinstance(row, dict) else None
+            if ts is not None and ts >= since:
+                counts[row_fingerprint(row)] += 1
+    return counts
+
+
+def iter_day_chunks(start, end):
+    """
+    Yield (chunk_start, filter_end, covered_through, full_day) tuples that walk
+    [start, end) in UTC day chunks. Full days use the legacy DayT23:59:59.999999Z
+    upper bound (and checkpoint with that same value); the final chunk, when
+    ``end`` is not at a day boundary, is clipped to ``end`` exactly and its
+    checkpoint is ``end`` so the partial day is never recorded as complete.
+    All values are aware-UTC datetimes.
+    """
+    cs = start
+    while cs < end:
+        next_midnight = datetime.combine(cs.date() + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc)
+        if next_midnight <= end:
+            fe = next_midnight - timedelta(microseconds=1)
+            yield cs, fe, fe, True
+            cs = next_midnight
         else:
-            date_end = datetime.now().strftime("%Y-%m-%d")
-    else:
-        date_range=False
+            yield cs, end, end, False
+            cs = end
 
-    return (date_range, date_start, date_end)
+
+def resume_point(saved_ts):
+    """
+    Convert a checkpoint timestamp to the next chunk start. Legacy checkpoints
+    (a full day's DayT23:59:59.999999Z) resume at the following midnight; any
+    other value is an exact exclusive coverage boundary and is resumed from as-is.
+    """
+    dt = parse_graph_ts(saved_ts)
+    if dt.hour == 23 and dt.minute == 59 and dt.second == 59 and dt.microsecond == 999999:
+        return datetime.combine(dt.date() + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc)
+    return dt
+
 
 def insert_time(time_range, start, end):
     """Insert a new [start, end] interval into a sorted list, merging overlaps."""

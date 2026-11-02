@@ -29,6 +29,7 @@ from datetime import datetime, timedelta, timezone
 from goosey.datadumper import DataDumper
 from goosey.progress import get_progress_manager
 from goosey.utils import *
+from goosey.utils import resolve_date_bounds, to_graph_ts
 from io import StringIO
 
 class M365DataDumper(DataDumper):
@@ -39,7 +40,8 @@ class M365DataDumper(DataDumper):
     - o365_app_auth (outlook_office_api): For Exchange Online AdminAPI PowerShell cmdlets
     """
 
-    def __init__(self, output_dir, reports_dir, app_auth, session, config, debug, o365_app_auth, token_manager=None, force_repull=False):
+    def __init__(self, output_dir, reports_dir, app_auth, session, config, debug, o365_app_auth, token_manager=None, force_repull=False,
+                 now=None):
         super().__init__(f'{output_dir}{os.path.sep}m365', reports_dir, app_auth, session, debug, token_manager=token_manager, endpoint_key="graph_api", force_repull=force_repull)
         self.logger = setup_logger(__name__, debug)
         self.gcc = config_get(config, 'config', 'gcc', self.logger).lower() == "true"
@@ -69,7 +71,9 @@ class M365DataDumper(DataDumper):
         self.tenantId = config_get(config, 'config', 'tenant')
         self.ual_tasks = []  # Active concurrent UAL sub-tasks
         self.ual_results_cache = []  # Buffers results when API returns data for wrong time range
-        self.date_range, self.date_start, self.date_end = get_date_range(config, self.logger)
+        # One UTC 'now' snapshot per dumper invocation (DEC-DATEBOUNDS-001); `now` is injectable for tests.
+        self.date_bounds = resolve_date_bounds(config, self.logger, now=now)
+        self.date_range, self.date_start, self.date_end = self.date_bounds.legacy_tuple()
 
         self.call_object = [self.endpoints["graph_api"] + "/beta/", self.app_auth, self.logger, self.output_dir, self.get_session()]
 
@@ -332,9 +336,11 @@ class M365DataDumper(DataDumper):
         max_retention_start = end - timedelta(days=90)
 
         if self.date_range:
-            self.logger.debug(f"Message trace using configured date range: {self.date_start} to {self.date_end}")
-            start = datetime.strptime(self.date_start, "%Y-%m-%d")
-            end = datetime.strptime(self.date_end, "%Y-%m-%d")
+            self.logger.debug(
+                f"Message trace using configured date range: "
+                f"{to_graph_ts(self.date_bounds.start)} to {to_graph_ts(self.date_bounds.end)}")
+            start = self.date_bounds.start
+            end = self.date_bounds.end
             # Clamp start to the 90-day retention window
             if start < max_retention_start:
                 self.logger.warning(
@@ -1182,8 +1188,8 @@ class M365DataDumper(DataDumper):
 
         if self.date_range:
             self.logger.debug(f'UAL Dump using specified date range: {self.date_start} to {self.date_end}')
-            start = utc.localize(datetime.strptime(self.date_start, "%Y-%m-%d"))
-            end = utc.localize(datetime.strptime(self.date_end, "%Y-%m-%d"))
+            start = self.date_bounds.start
+            end = self.date_bounds.end
 
         # Restore bounds state from previous run (tracks sub-range search progress)
         bounds_save_state = load_state(boundsfile, is_datetime=False, time_bounds=True)
@@ -1303,8 +1309,8 @@ class M365DataDumper(DataDumper):
 
         if self.date_range:
             self.logger.debug(f'Graph UAL using specified date range: {self.date_start} to {self.date_end}')
-            start = datetime.strptime(self.date_start, "%Y-%m-%d")
-            end = datetime.strptime(self.date_end, "%Y-%m-%d")
+            start = self.date_bounds.start
+            end = self.date_bounds.end
 
         # Load save state
         saved_end = load_state(statefile)

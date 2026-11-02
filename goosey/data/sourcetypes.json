@@ -3275,6 +3275,11 @@
             "msgraph": {
               "display_name": "Microsoft Graph Activity",
               "sourcetypes": {
+                "aadgraphactivitylogs": {
+                  "display_name": "Aadgraphactivitylogs",
+                  "description": "Log Analytics Workspace table: aadgraphactivitylogs (legacy Azure AD Graph, graph.windows.net, request activity)",
+                  "file_glob": "azure/*/log_analytics_workspace/*/AADGraphActivityLogs*json"
+                },
                 "microsoftgraphactivitylogs": {
                   "display_name": "Microsoftgraphactivitylogs",
                   "description": "Log Analytics Workspace table: microsoftgraphactivitylogs",

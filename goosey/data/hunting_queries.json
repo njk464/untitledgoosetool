@@ -14,7 +14,7 @@
       "hql_query": "where ['status.errorCode'] != \"0\" | summarize count() by ['location.countryOrRegion'] | sort by count_ desc | take 20",
       "source_kql": "SigninLogs | where ResultType != 0 | summarize Count=count() by Location | sort by Count desc | take 20",
       "source_url": "https://docs.microsoft.com/en-us/azure/active-directory/reports-monitoring/concept-sign-ins",
-      "target_files": ["signin_*/signin_log_*.json", "signin_*/signin_log_*.jsonl"]
+      "target_files": ["entraid/signin_*/*signin_log_*.json", "entraid/signin_*/*signin_log_*.jsonl"]
     },
     {
       "id": "hunt-signin-002",
@@ -27,7 +27,7 @@
       "hql_query": "where ['status.errorCode'] != \"0\" | summarize count(), dcount(userPrincipalName) by ipAddress | sort by count_ desc | take 20",
       "source_kql": "SigninLogs | where ResultType != 0 | summarize Count=count(), UniqueUsers=dcount(UserPrincipalName) by IPAddress | sort by Count desc | take 20",
       "source_url": "",
-      "target_files": ["signin_*/signin_log_*.json", "signin_*/signin_log_*.jsonl"]
+      "target_files": ["entraid/signin_*/*signin_log_*.json", "entraid/signin_*/*signin_log_*.jsonl"]
     },
     {
       "id": "hunt-signin-003",
@@ -40,7 +40,7 @@
       "hql_query": "where ['status.errorCode'] != \"0\" | summarize count() by userPrincipalName | sort by count_ desc | take 20",
       "source_kql": "SigninLogs | where ResultType != 0 | summarize Count=count() by UserPrincipalName | sort by Count desc | take 20",
       "source_url": "",
-      "target_files": ["signin_*/signin_log_*.json", "signin_*/signin_log_*.jsonl"]
+      "target_files": ["entraid/signin_*/*signin_log_*.json", "entraid/signin_*/*signin_log_*.jsonl"]
     },
     {
       "id": "hunt-signin-004",
@@ -53,7 +53,7 @@
       "hql_query": "where clientAppUsed != \"Browser\" and clientAppUsed != \"Mobile Apps and Desktop clients\" | summarize count() by clientAppUsed, userPrincipalName | sort by count_ desc | take 30",
       "source_kql": "SigninLogs | where ClientAppUsed !in (\"Browser\",\"Mobile Apps and Desktop clients\") | summarize Count=count() by ClientAppUsed, UserPrincipalName | sort by Count desc",
       "source_url": "https://docs.microsoft.com/en-us/azure/active-directory/conditional-access/block-legacy-authentication",
-      "target_files": ["signin_*/signin_log_*.json", "signin_*/signin_log_*.jsonl"]
+      "target_files": ["entraid/signin_*/*signin_log_*.json", "entraid/signin_*/*signin_log_*.jsonl"]
     },
     {
       "id": "hunt-signin-005",
@@ -66,7 +66,7 @@
       "hql_query": "where riskLevelDuringSignIn == \"high\" or riskLevelDuringSignIn == \"medium\" | project userPrincipalName, ipAddress, ['location.countryOrRegion'], riskLevelDuringSignIn, riskState, appDisplayName | take 50",
       "source_kql": "SigninLogs | where RiskLevelDuringSignIn in (\"high\",\"medium\") | project UserPrincipalName, IPAddress, Location, RiskLevelDuringSignIn, RiskState, AppDisplayName",
       "source_url": "https://docs.microsoft.com/en-us/azure/active-directory/identity-protection/overview-identity-protection",
-      "target_files": ["signin_*/signin_log_*.json", "signin_*/signin_log_*.jsonl"]
+      "target_files": ["entraid/signin_*/*signin_log_*.json", "entraid/signin_*/*signin_log_*.jsonl"]
     },
     {
       "id": "hunt-signin-006",
@@ -79,7 +79,7 @@
       "hql_query": "where authenticationProtocol == \"deviceCode\" or originalTransferMethod contains \"deviceCode\" | project userPrincipalName, ipAddress, appDisplayName, ['location.countryOrRegion'], authenticationProtocol | take 50",
       "source_kql": "SigninLogs | where AuthenticationProtocol =~ \"deviceCode\" | project UserPrincipalName, IPAddress, AppDisplayName, Location, AuthenticationProtocol",
       "source_url": "https://docs.microsoft.com/en-us/azure/active-directory/develop/v2-oauth2-device-code",
-      "target_files": ["signin_*/signin_log_*.json", "signin_*/signin_log_*.jsonl"]
+      "target_files": ["entraid/signin_*/*signin_log_*.json", "entraid/signin_*/*signin_log_*.jsonl"]
     },
     {
       "id": "hunt-signin-007",
@@ -92,7 +92,7 @@
       "hql_query": "where ['deviceDetail.browser'] contains \"python\" or ['deviceDetail.browser'] contains \"powershell\" or ['deviceDetail.browser'] contains \"curl\" or ['deviceDetail.browser'] contains \"requests\" | summarize count() by ['deviceDetail.browser'], userPrincipalName, ipAddress | sort by count_ desc | take 30",
       "source_kql": "SigninLogs | where DeviceDetail.Browser has_any (\"python\",\"powershell\",\"curl\",\"requests\") | summarize Count=count() by Browser=DeviceDetail.Browser, UserPrincipalName, IPAddress | sort by Count desc",
       "source_url": "",
-      "target_files": ["signin_*/signin_log_*.json", "signin_*/signin_log_*.jsonl"]
+      "target_files": ["entraid/signin_*/*signin_log_*.json", "entraid/signin_*/*signin_log_*.jsonl"]
     },
     {
       "id": "hunt-signin-008",
@@ -105,7 +105,7 @@
       "hql_query": "where ['status.failureReason'] contains \"MFA\" | summarize count() by userPrincipalName, ['status.failureReason'] | sort by count_ desc | take 20",
       "source_kql": "SigninLogs | where ResultDescription has \"MFA\" | summarize Count=count() by UserPrincipalName, ResultDescription | sort by Count desc",
       "source_url": "https://docs.microsoft.com/en-us/azure/active-directory/authentication/howto-mfa-reporting",
-      "target_files": ["signin_*/signin_log_*.json", "signin_*/signin_log_*.jsonl"]
+      "target_files": ["entraid/signin_*/*signin_log_*.json", "entraid/signin_*/*signin_log_*.jsonl"]
     },
     {
       "id": "hunt-signin-009",
@@ -118,7 +118,7 @@
       "hql_query": "where servicePrincipalId != \"\" | summarize count() by servicePrincipalId, appDisplayName, ipAddress | sort by count_ desc | take 30",
       "source_kql": "AADServicePrincipalSignInLogs | summarize Count=count() by ServicePrincipalId, AppDisplayName, IPAddress | sort by Count desc",
       "source_url": "",
-      "target_files": ["signin_*/signin_log_*.json", "signin_*/signin_log_*.jsonl"]
+      "target_files": ["entraid/signin_*/*signin_log_*.json", "entraid/signin_*/*signin_log_*.jsonl"]
     },
     {
       "id": "hunt-ual-001",
@@ -443,7 +443,7 @@
       "hql_query": "where conditionalAccessStatus == \"failure\" | summarize count() by userPrincipalName, appDisplayName, ipAddress | sort by count_ desc | take 20",
       "source_kql": "SigninLogs | where ConditionalAccessStatus == \"failure\" | summarize Count=count() by UserPrincipalName, AppDisplayName, IPAddress | sort by Count desc",
       "source_url": "",
-      "target_files": ["signin_*/signin_log_*.json", "signin_*/signin_log_*.jsonl"]
+      "target_files": ["entraid/signin_*/*signin_log_*.json", "entraid/signin_*/*signin_log_*.jsonl"]
     },
     {
       "id": "hunt-signin-011",
@@ -456,7 +456,7 @@
       "hql_query": "where authenticationRequirement == \"multiFactorAuthentication\" | summarize count() by userPrincipalName, appDisplayName | sort by count_ desc | take 20",
       "source_kql": "SigninLogs | where AuthenticationRequirement == \"multiFactorAuthentication\" | summarize Count=count() by UserPrincipalName, AppDisplayName | sort by Count desc",
       "source_url": "",
-      "target_files": ["signin_*/signin_log_*.json", "signin_*/signin_log_*.jsonl"]
+      "target_files": ["entraid/signin_*/*signin_log_*.json", "entraid/signin_*/*signin_log_*.jsonl"]
     },
     {
       "id": "hunt-ual-009",
@@ -508,7 +508,7 @@
       "hql_query": "where ['deviceDetail.isCompliant'] == false and ['status.errorCode'] == \"0\" | summarize count() by userPrincipalName, appDisplayName, ['deviceDetail.operatingSystem'] | sort by count_ desc | take 20",
       "source_kql": "SigninLogs | where DeviceDetail.IsCompliant == false and ResultType == 0 | summarize Count=count() by UserPrincipalName, AppDisplayName, DeviceOperatingSystem | sort by Count desc",
       "source_url": "",
-      "target_files": ["signin_*/signin_log_*.json", "signin_*/signin_log_*.jsonl"]
+      "target_files": ["entraid/signin_*/*signin_log_*.json", "entraid/signin_*/*signin_log_*.jsonl"]
     },
     {
       "id": "hunt-ual-010",
@@ -522,6 +522,32 @@
       "source_kql": "OfficeActivity | where Operation in (\"Set-Mailbox\",\"Set-InboxRule\") | project UserId, TimeGenerated, Operation, Parameters",
       "source_url": "",
       "target_files": ["ual_*.json", "ual_*.jsonl"]
+    },
+    {
+      "id": "hunt-signin-013",
+      "name": "Legacy AAD Graph Token via Azure CLI and python-requests (ROADtools Precursor)",
+      "description": "Non-interactive sign-ins where Microsoft Azure CLI (04b07795-8ddb-461a-bbee-02f9e1bf7b46) successfully obtains a token for Windows Azure Active Directory / legacy AAD Graph (00000002-0000-0000-c000-000000000000) using a python-requests user agent. This is the token-acquisition step that precedes ROADrecon-style collection; pair with hunt-law-001 (AADGraphActivityLogs burst). Operates on the non-interactive (rt) sign-in artifacts. Stronger correlation (not shipped as HQL because pyhql cannot express it faithfully): the same user, IP, Azure CLI AppId and python-requests UA acquiring tokens for 3 or more distinct resources including legacy AAD Graph; see the second query in source_kql.",
+      "category": "entra_id",
+      "subcategory": "sign_in",
+      "severity": "medium",
+      "mitre_ids": ["T1528", "T1078.004"],
+      "hql_query": "where appId == \"04b07795-8ddb-461a-bbee-02f9e1bf7b46\" and resourceId == \"00000002-0000-0000-c000-000000000000\" and ['status.errorCode'] == 0 and userAgent contains \"python-requests\" | project createdDateTime, userPrincipalName, userId, ipAddress, appDisplayName, appId, resourceDisplayName, resourceId, userAgent, correlationId | sort by createdDateTime desc | take 100",
+      "source_kql": "AADNonInteractiveUserSignInLogs | where AppId == \"04b07795-8ddb-461a-bbee-02f9e1bf7b46\" and ResourceIdentity == \"00000002-0000-0000-c000-000000000000\" and ResultType == 0 and UserAgent has \"python-requests\" | project TimeGenerated, CreatedDateTime, UserPrincipalName, UserId, IPAddress, AppDisplayName, AppId, ResourceDisplayName, ResourceIdentity, UserAgent, CorrelationId\n\n// Correlation (full form):\nAADNonInteractiveUserSignInLogs | where AppId == \"04b07795-8ddb-461a-bbee-02f9e1bf7b46\" and ResultType == 0 and UserAgent has \"python-requests\" | summarize DistinctResources=dcount(ResourceIdentity), Resources=make_set(ResourceDisplayName) by UserId, IPAddress, AppId, UserAgent, bin(TimeGenerated, 10m) | where DistinctResources >= 3 and set_has_element(Resources, \"Windows Azure Active Directory\")",
+      "source_url": "https://learn.microsoft.com/en-us/entra/identity/monitoring-health/concept-sign-ins",
+      "target_files": ["entraid/signin_rt/rt_signin_log_*.json", "entraid/signin_rt/rt_signin_log_*.jsonl"]
+    },
+    {
+      "id": "hunt-law-001",
+      "name": "ROADrecon-style Direct AAD Graph Request Burst",
+      "description": "Detects a high-volume burst of direct legacy Azure AD Graph (graph.windows.net) requests in AADGraphActivityLogs. ROADrecon's gather phase talks only to legacy AAD Graph; a controlled run produced 3,136 log rows for 2,938 HTTP requests from one Azure CLI AppId (04b07795-8ddb-461a-bbee-02f9e1bf7b46), one UserId, one CallerIpAddress and a scripted UserAgent (Python/3.11 aiohttp/3.14.5) within an 11-second TimeRequested window, with TimeGenerated 2-4 minutes later. HQL form: groups the selected daily AADGraphActivityLogs artifact by UserId, CallerIpAddress, AppId and UserAgent and returns request count (n) and distinct RequestUri (uris) for groups above 100. pyhql cannot time-bin, so the HQL threshold applies to the whole selected file; the Sentinel KQL in source_kql bins TimeRequested into 5 minutes and is the precise form. Always bin on TimeRequested, not TimeGenerated (ingestion lag). Do not attribute python-requests traffic in MicrosoftGraphActivityLogs to ROADrecon: ROADrecon does not use Microsoft Graph. An empty (0-byte) artifact means the table was queried and had zero rows.",
+      "category": "azure",
+      "subcategory": "law",
+      "severity": "high",
+      "mitre_ids": ["T1087.004", "T1069.003", "T1526"],
+      "hql_query": "summarize n=count(), uris=dcount(RequestUri) by UserId, CallerIpAddress, AppId, UserAgent | where n > 100 or uris > 100 | sort by n desc | take 50",
+      "source_kql": "AADGraphActivityLogs | summarize Requests=count(), DistinctUris=dcount(RequestUri), FirstRequest=min(TimeRequested), LastRequest=max(TimeRequested) by UserId, CallerIpAddress, AppId, UserAgent, bin(TimeRequested, 5m) | where Requests > 100 or DistinctUris > 100 | sort by Requests desc",
+      "source_url": "https://learn.microsoft.com/en-us/entra/identity/monitoring-health/concept-microsoft-graph-activity-logs",
+      "target_files": ["azure/*/log_analytics_workspace/*/AADGraphActivityLogs*json"]
     }
   ]
 }

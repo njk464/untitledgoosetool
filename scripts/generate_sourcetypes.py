@@ -140,6 +140,7 @@ SUBTYPE_META = {
 # Each entry is (prefix, subcategory_id, display_name).
 # Prefixes matched in order: list longer/more-specific prefixes before shorter ones.
 LAW_SUBCATEGORIES = [
+    ("aadgraphactivity", "msgraph", "Microsoft Graph Activity"),  # legacy AAD Graph request log (ROADrecon telemetry)
     ("aaddomainservices", "aad", "Azure AD / Entra ID"),
     ("aadmanagedidentity", "aad", "Azure AD / Entra ID"),
     ("aadnoninteractive", "aad", "Azure AD / Entra ID"),
@@ -550,14 +551,27 @@ def get_law_subcategory(table_name: str) -> str:
     return "other"
 
 
+def strip_output_prefix(monitor_path: str) -> str:
+    """Drop everything up to and including the first ``output/`` path segment.
+
+    Splunk monitor paths embed the collector machine's absolute path
+    (``/any/where/output/azure/...``); only the part below ``output/`` is
+    meaningful.  Paths without an ``output`` segment are returned unchanged.
+    """
+    marker = "/output/"
+    idx = ("/" + monitor_path.lstrip("/")).find(marker)
+    if idx == -1:
+        return monitor_path
+    return ("/" + monitor_path.lstrip("/"))[idx + len(marker):]
+
+
 def parse_inputs_conf(path: str) -> list:
     """
     Parse inputs.conf and return list of {sourcetype, monitor} dicts.
 
-    Strips the user-specific Splunk base path prefix and replaces the Splunk
+    Strips the machine-specific path up to ``output/`` and replaces the Splunk
     wildcard directory separator '.../' with '{sub_id}/' for Azure subscription IDs.
     """
-    BASE = "Users/nkantor/Documents/Sandia/cloud_stuff/vxnstategoose/output/"
     results = []
     current_monitor = None
 
@@ -570,8 +584,7 @@ def parse_inputs_conf(path: str) -> list:
             elif current_monitor and re.match(r"^\s*sourcetype\s*=", line):
                 st = line.split("=", 1)[1].strip()
                 path_val = current_monitor
-                if path_val.startswith(BASE):
-                    path_val = path_val[len(BASE):]
+                path_val = strip_output_prefix(path_val)
                 path_val = path_val.replace(".../", "{sub_id}/")
                 results.append({"sourcetype": st, "monitor": path_val})
                 current_monitor = None

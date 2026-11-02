@@ -40,11 +40,14 @@ from datetime import datetime, timedelta
 from goosey.datadumper import DataDumper
 from goosey.progress import get_progress_manager
 from goosey.utils import *
+from goosey.utils import (IdDedupe, floor_to_day, get_incremental_lookback, iter_day_chunks,
+                          resolve_date_bounds, resume_point, to_graph_ts)
 
 class EntraIdDataDumper(DataDumper):
     """Collects Entra ID / Azure AD data via the Microsoft Graph API beta endpoint."""
 
-    def __init__(self, output_dir, reports_dir, app_auth, session, config, debug, token_manager=None, force_repull=False):
+    def __init__(self, output_dir, reports_dir, app_auth, session, config, debug, token_manager=None, force_repull=False,
+                 now=None):
         super().__init__(f'{output_dir}{os.path.sep}entraid', reports_dir, app_auth, session, debug, token_manager=token_manager, endpoint_key="graph_api", force_repull=force_repull)
         self.logger = setup_logger(__name__, debug)
         self.gcc = config_get(config, 'config', 'gcc', self.logger).lower() == "true"
@@ -52,9 +55,36 @@ class EntraIdDataDumper(DataDumper):
         endpoints = get_endpoints(gcc=self.gcc, gcc_high=self.gcc_high)
         self.graph_url = endpoints["graph_api"]
         self.failurefile = os.path.join(reports_dir, '_no_results.json')
-        self.date_range, self.date_start, self.date_end = get_date_range(config, self.logger)
+        # One UTC 'now' snapshot per dumper invocation (DEC-DATEBOUNDS-001); `now` is injectable for tests.
+        self.date_bounds = resolve_date_bounds(config, self.logger, now=now)
+        self.date_range, self.date_start, self.date_end = self.date_bounds.legacy_tuple()
+        self.lookback = get_incremental_lookback(config, self.logger)
+        self.logger.info(f'Incremental lookback on resume: {self.lookback.total_seconds() / 60:g} minutes')
 
         self.call_object = [self.get_url(), self.app_auth, self.logger, self.output_dir, self.get_session()]
+
+    @staticmethod
+    def _read_state(statefile):
+        """Read a save-state file. Formats (both still accepted):
+        'time\\n<ts>' and 'skiptoken\\n<nexturl>\\n<ts>'. Returns (nexturl|None, ts).
+        <ts> is either a legacy full-day end (DayT23:59:59.999999Z -> resume next midnight)
+        or an exact exclusive coverage boundary (resume with `ge <ts>`)."""
+        with open(statefile, "r") as f:
+            kind = f.readline().strip()
+            nexturl = None
+            if kind == "skiptoken":
+                nexturl = f.readline().strip() or None
+            ts = f.readline().strip()
+        return nexturl, ts
+
+    @staticmethod
+    def _write_state(statefile, covered_through):
+        """Atomically record the exact UTC instant up to which data is complete."""
+        tmp = statefile + '.tmp'
+        with open(tmp, 'w') as f:
+            f.write("time\n")
+            f.write(to_graph_ts(covered_through))
+        os.replace(tmp, statefile)
 
     async def dump_signins_adfs(self):
         """
@@ -99,48 +129,43 @@ class EntraIdDataDumper(DataDumper):
             os.mkdir(signin_directory)
 
         statefile = f'{self.output_dir}{os.path.sep}.{source}_signin_state'
+        end_dt = self.date_bounds.end  # exclusive, aware UTC; never beyond this
+        resume_url = None
+        checkpoint_dt = None
         if os.path.isfile(statefile):
             self.logger.debug(f'Save state file exists at {statefile}')
             self.logger.info(f'{source} signin dump save state file found. Continuing from last checkpoint.')
-
-            with open(statefile, "r") as f:
-                save_state_type = f.readline().strip()
-                if save_state_type == "time":
-                    save_state_time = f.readline()
-                    nexturl = None
-                if save_state_type == "skiptoken":
-                    nexturl = f.readline()
-                    save_state_time = f.readline()
-
-            start = '%sT00:00:00.000000Z' % (datetime.strptime(save_state_time, ("%Y-%m-%dT%H:%M:%S.%fZ")).date() + timedelta(days=1))
-            end_time = '%sT23:59:59.999999Z' % (datetime.strptime(start, ("%Y-%m-%dT%H:%M:%S.%fZ")).date())
-            outfile = os.path.join(signin_directory, source + '_signin_log_' + str(datetime.strptime(end_time, ("%Y-%m-%dT%H:%M:%S.%fZ")).date()) + '.json')
-            await get_nextlink(nexturl, outfile, self.ahsession, self.logger, self.app_auth)
-            end_date = '%sT00:00:00.000000Z' % (datetime.now().strftime("%Y-%m-%d"))
+            resume_url, saved_ts = self._read_state(statefile)
+            checkpoint_dt = resume_point(saved_ts)
+            lower = self.date_bounds.start if self.date_range else floor_to_day(end_dt - timedelta(days=29))
+            start_dt = max(checkpoint_dt - self.lookback, lower)
+            if resume_url:
+                outfile = os.path.join(signin_directory, source + '_signin_log_' + str(checkpoint_dt.date()) + '.json')
+                await get_nextlink(resume_url, outfile, self.ahsession, self.logger, self.app_auth)
 
         elif self.date_range:
-            self.logger.debug(f'Specified date range found. Pulling signin logs for source {source} between {self.date_start} and {self.date_end}')
-            start = self.date_start + 'T00:00:00.000000Z'
-            end_date = self.date_end + 'T00:00:00.000000Z'
+            self.logger.debug(f'Specified date range found. Pulling signin logs for source {source} '
+                              f'between {to_graph_ts(self.date_bounds.start)} and {to_graph_ts(end_dt)}')
+            start_dt = self.date_bounds.start
 
         else:
             self.logger.debug(f'Save state file does not exist at {statefile}.')
-            start = '%sT00:00:00.000000Z' % ((datetime.now() - timedelta(days=29)).strftime("%Y-%m-%d"))
+            start_dt = floor_to_day(end_dt - timedelta(days=29))
             self.logger.info('Getting signin logs for source %s...' % (source))
-            end_date = '%sT00:00:00.000000Z' % (datetime.now().strftime("%Y-%m-%d"))
 
         # Calculate total days for progress bar
-        total_days = (dateutil.parser.parse(end_date) - dateutil.parser.parse(start)).days
+        total_days = (end_dt - start_dt).days
         pm = get_progress_manager()
         pbar = None
         if pm and total_days > 0:
             task_name = f"entraid_signins_{source}"
             pbar = pm.create_time_bar(task_name, total_days, desc=f"{'entraid_signins_' + source:<35}")
 
-        while dateutil.parser.parse(start) < dateutil.parser.parse(end_date):
+        for chunk_start, chunk_end, covered_through, _full in iter_day_chunks(start_dt, end_dt):
             self.ensure_token()
-            end_time = '%sT23:59:59.999999Z' % (datetime.strptime(start, ("%Y-%m-%dT%H:%M:%S.%fZ")).date())
-            outfile = os.path.join(signin_directory, source + '_signin_log_' + str(datetime.strptime(end_time, ("%Y-%m-%dT%H:%M:%S.%fZ")).date()) + '.json')
+            start = to_graph_ts(chunk_start)
+            end_time = to_graph_ts(chunk_end)
+            outfile = os.path.join(signin_directory, source + '_signin_log_' + str(chunk_start.date()) + '.json')
             filters = '(createdDateTime ge %s and createdDateTime lt %s)' % (start, end_time)
             params = {
                 'api-version': 'beta',
@@ -150,6 +175,9 @@ class EntraIdDataDumper(DataDumper):
             }
             url = self.graph_url + "/beta/auditLogs/signIns"
             retries = 5
+            chunk_ok = False
+            # Overlap re-fetch (before the checkpoint): skip ids already in this day's file
+            dedupe = IdDedupe(outfile if checkpoint_dt and chunk_start < checkpoint_dt else None)
             for counter in range (retries):
                 try:
                     header = {'Authorization': '%s %s' % (self.app_auth['token_type'], self.app_auth['access_token'])}
@@ -160,7 +188,7 @@ class EntraIdDataDumper(DataDumper):
                             nexturl = result['@odata.nextLink']
                         if 'value' in result:
                             with open(outfile, 'a+', encoding='utf-8') as f:
-                                for x in result['value']:
+                                for x in dedupe.filter(result['value']):
                                     f.write(json.dumps(x))
                                     f.write("\n")
                                 f.flush()
@@ -171,10 +199,11 @@ class EntraIdDataDumper(DataDumper):
                                 self.logger.error("Please re-auth.")
                                 return
 
-                        await get_nextlink(nexturl, outfile, self.ahsession, self.logger, self.app_auth)
-                        with open(statefile, 'w') as f:
-                            f.write("time\n")
-                            f.write(end_time)
+                        await get_nextlink(nexturl, outfile, self.ahsession, self.logger, self.app_auth, dedupe=dedupe)
+                        # Never move the checkpoint backwards while re-reading the overlap
+                        if checkpoint_dt is None or covered_through > checkpoint_dt:
+                            self._write_state(statefile, covered_through)
+                    chunk_ok = True
                     break
 
                 except Exception as e:
@@ -193,7 +222,11 @@ class EntraIdDataDumper(DataDumper):
 
             if os.path.isfile(outfile) and os.stat(outfile).st_size == 0:
                 os.remove(outfile)
-            start = '%sT00:00:00.000000Z' % ((datetime.strptime(start, ("%Y-%m-%dT%H:%M:%S.%fZ")).date() + timedelta(days=1)).strftime("%Y-%m-%d"))
+            if not chunk_ok:
+                # Never skip a failed chunk: a later checkpoint would claim coverage over the gap.
+                self.logger.error(f'Signin source {source}: failed to collect {start} to {end_time}; '
+                                  'stopping so the checkpoint stays before the gap.')
+                break
             if pbar:
                 pbar.update(1)
 
@@ -212,56 +245,51 @@ class EntraIdDataDumper(DataDumper):
 
         url = self.graph_url + "/beta/auditLogs/directoryAudits"
 
-        start_default = '%sT00:00:00.000000Z' % ((datetime.now() - timedelta(days=29)).strftime("%Y-%m-%d"))
-        end_date_default = '%sT00:00:00.000000Z' % (datetime.now().strftime("%Y-%m-%d"))
+        end_dt = self.date_bounds.end  # exclusive, aware UTC; never beyond this
+        start_default_dt = floor_to_day(end_dt - timedelta(days=29))
         statefile = f'{self.output_dir}{os.path.sep}.audit_log_state'
+        checkpoint_dt = None
         if os.path.isfile(statefile):
             self.logger.debug(f'Save state file exists at {statefile}')
             self.logger.info(f'Audit log dump save state file found. Continuing from last checkpoint.')
-
-            with open(statefile, "r") as f:
-                save_state_type = f.readline().strip()
-                if save_state_type == "time":
-                    save_state_time = f.readline()
-                    nexturl = None
-                if save_state_type == "skiptoken":
-                    nexturl = f.readline()
-                    save_state_time = f.readline()
-
-            start = '%sT00:00:00.000000Z' % (datetime.strptime(save_state_time, ("%Y-%m-%dT%H:%M:%S.%fZ")).date() + timedelta(days=1))
-            end_time = '%sT23:59:59.999999Z' % (datetime.strptime(start, ("%Y-%m-%dT%H:%M:%S.%fZ")).date())
-            outfile = os.path.join(sub_dir, 'entraidauditlog_' + str(datetime.strptime(end_time, ("%Y-%m-%dT%H:%M:%S.%fZ")).date()) + '.json')
-            await get_nextlink(nexturl, outfile, self.ahsession, self.logger, self.app_auth)
-            end_date = '%sT00:00:00.000000Z' % (datetime.now().strftime("%Y-%m-%d"))
+            resume_url, saved_ts = self._read_state(statefile)
+            checkpoint_dt = resume_point(saved_ts)
+            lower = self.date_bounds.start if self.date_range else start_default_dt
+            start_dt = max(checkpoint_dt - self.lookback, lower)
+            if resume_url:
+                outfile = os.path.join(sub_dir, 'entraidauditlog_' + str(checkpoint_dt.date()) + '.json')
+                await get_nextlink(resume_url, outfile, self.ahsession, self.logger, self.app_auth)
 
         elif self.date_range:
-            start = self.date_start + 'T00:00:00.000000Z'
-            end_date = self.date_end + 'T00:00:00.000000Z'
-            self.logger.debug(f'Specified date range found. Pulling audit logs between {self.date_start} and {self.date_end}')
+            start_dt = self.date_bounds.start
+            self.logger.debug(
+                'Specified date range found. Pulling audit logs between '
+                f'{to_graph_ts(start_dt)} and {to_graph_ts(end_dt)}')
 
         else:
             self.logger.debug(f'Save state file does not exist at {statefile}.')
-            start = start_default
-            end_date = end_date_default
+            start_dt = start_default_dt
 
-        if start < start_default:
+        if start_dt < start_default_dt:
             self.logger.debug('Specified start time longer than audit log retention period. Using default of 30 days')
-            start = start_default
-
+            start_dt = start_default_dt
 
         self.logger.info('Getting Entra ID audit logs...')
-        total_days = (dateutil.parser.parse(end_date) - dateutil.parser.parse(start)).days
+        total_days = (end_dt - start_dt).days
         pm = get_progress_manager()
         pbar = None
         if pm and total_days > 0:
             pbar = pm.create_time_bar("entraid_audit", total_days, desc=f"{'entraid_audit':<35}")
 
-        while start < end_date:
+        for chunk_start, chunk_end, covered_through, _full in iter_day_chunks(start_dt, end_dt):
             self.ensure_token()
             retries = 5
-            end_time = '%sT23:59:59.999999Z' % (datetime.strptime(start, ("%Y-%m-%dT%H:%M:%S.%fZ")).date())
-            outfile = os.path.join(sub_dir, 'entraidauditlog_' + str(datetime.strptime(end_time, ("%Y-%m-%dT%H:%M:%S.%fZ")).date()) + '.json')
+            start = to_graph_ts(chunk_start)
+            end_time = to_graph_ts(chunk_end)
+            outfile = os.path.join(sub_dir, 'entraidauditlog_' + str(chunk_start.date()) + '.json')
             filters = '(activityDateTime ge %s and activityDateTime lt %s)' % (start, end_time)
+            # Overlap re-fetch (before the checkpoint): skip ids already in this day's file
+            dedupe = IdDedupe(outfile if checkpoint_dt and chunk_start < checkpoint_dt else None)
 
             params = {
                 'api-version': 'beta',
@@ -279,13 +307,17 @@ class EntraIdDataDumper(DataDumper):
                         result = await r.json()
                         nexturl = None
                         if '@odata.nextLink' in result:
-                                nexturl = result['@odata.nextLink']
-                                await get_nextlink(nexturl, outfile, self.ahsession, self.logger, self.app_auth)
+                            nexturl = result['@odata.nextLink']
                         if 'value' in result:
+                            # Append (never truncate): a resumed partial day extends the same file.
                             if result['value'] != []:
-                                with open(outfile, 'w', encoding='utf-8') as f:
-                                    f.write("\n".join([json.dumps(x) for x in result['value']]) + '\n')
-                            start = '%sT00:00:00.000000Z' % ((datetime.strptime(start, ("%Y-%m-%dT%H:%M:%S.%fZ")).date() + timedelta(days=1)).strftime("%Y-%m-%d"))
+                                fresh = dedupe.filter(result['value'])
+                                if fresh:
+                                    with open(outfile, 'a', encoding='utf-8') as f:
+                                        f.write("\n".join([json.dumps(x) for x in fresh]) + '\n')
+                            if nexturl:
+                                await get_nextlink(nexturl, outfile, self.ahsession, self.logger, self.app_auth,
+                                                   dedupe=dedupe)
                             # We need to end the retry loop if we successfully dumped the audit log data
                             success = True
                         if 'error' in result:
@@ -299,11 +331,10 @@ class EntraIdDataDumper(DataDumper):
                                 await asyncio.sleep(RATE_LIMIT_SLEEP_SECONDS)
                                 retries -=1
 
-                        with open(statefile, 'w') as f:
-                            f.write("time\n")
-                            f.write(end_time)
-
                         if success:
+                            # Checkpoint only what was actually covered (clipped to `now` for the final chunk).
+                            if checkpoint_dt is None or covered_through > checkpoint_dt:
+                                self._write_state(statefile, covered_through)
                             if pbar:
                                 pbar.update(1)
                             break
@@ -322,6 +353,10 @@ class EntraIdDataDumper(DataDumper):
                     except AttributeError as a:
                         self.logger.error('Error on nextLink retrieval: {}'.format(str(e)))
 
+            if not success:
+                self.logger.error(f'Entra audit: failed to collect {start} to {end_time}; '
+                                  'stopping so the checkpoint stays before the gap.')
+                break
 
         self.logger.info('Finished dumping Entra ID audit logs.')
     dump_entraid_audit._manages_own_progress = True

@@ -15,11 +15,12 @@ Two auth tokens are used:
   (api/advancedhunting), used for AlertInfo/AlertEvidence and Identity tables.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 import itertools
 from goosey.datadumper import DataDumper
 from goosey.progress import get_progress_manager
 from goosey.utils import *
+from goosey.utils import resolve_date_bounds, to_graph_ts
 import pytz
 
 utc=pytz.UTC
@@ -35,7 +36,8 @@ class MDEDataDumper(DataDumper):
     - 'machine': Queries each table per-machine, creating separate output dirs per device.
     """
 
-    def __init__(self, output_dir, reports_dir, app_auth, app_auth2, app_auth3, app_auth4, session, config, debug, token_manager=None, portal_auth=None, force_repull=False):
+    def __init__(self, output_dir, reports_dir, app_auth, app_auth2, app_auth3, app_auth4, session, config, debug, token_manager=None, portal_auth=None, force_repull=False,
+                 now=None):
         super().__init__(f'{output_dir}{os.path.sep}mde', reports_dir, app_auth, session, debug, token_manager=token_manager, endpoint_key="securitycenter_api", force_repull=force_repull)
         self.app_auth2 = app_auth2  # security_api token for M365 Defender advanced hunting
         self.app_auth3 = app_auth3  # graph_api token for Graph-based hunting queries
@@ -52,7 +54,9 @@ class MDEDataDumper(DataDumper):
         self.graph_call_object = [self.endpoints["graph_api"] + "/v1.0/", self.app_auth3, self.logger, self.output_dir, self.get_session()]
         self.threshold = int(config_get(config, 'variables', 'mde_threshold'))
         self.mde_query_mode = config_get(config, 'variables', 'mde_query_mode')
-        self.date_range, self.date_start, self.date_end = get_date_range(config, self.logger)
+        # One UTC 'now' snapshot per dumper invocation (DEC-DATEBOUNDS-001); `now` is injectable for tests.
+        self.date_bounds = resolve_date_bounds(config, self.logger, now=now)
+        self.date_range, self.date_start, self.date_end = self.date_bounds.legacy_tuple()
         self.machine_api_semaphore = asyncio.Semaphore(10)
         self.portal_semaphore = asyncio.Semaphore(3)
         self._portal_auth_method = portal_auth.get('auth_method', 'ests_cookie') if portal_auth else None
@@ -196,14 +200,13 @@ class MDEDataDumper(DataDumper):
         unique_ids = set()
 
         # default end time. Now
-        default_end = datetime.now(timezone.utc)
+        default_end = self.date_bounds.end
 
         # default start time
         default_start = (default_end - timedelta(days=31*6))
 
         if self.date_range:
-            default_start = utc.localize(datetime.strptime(self.date_start, "%Y-%m-%d"))
-            default_end = utc.localize(datetime.strptime(self.date_end, "%Y-%m-%d"))
+            default_start = self.date_bounds.start
 
         saved_end = load_state(statefile)
         if saved_end:
@@ -357,15 +360,15 @@ class MDEDataDumper(DataDumper):
         """
 
         # default end time. Now
-        end = utc.localize(datetime.now())
+        end = self.date_bounds.end
 
         # defult start tiem
         start = end - timedelta(days=364)
 
         if self.date_range:
             self.logger.debug(f'MDE Dump using specified date range: {self.date_start} to {self.date_end}')
-            start = utc.localize(datetime.strptime(self.date_start,"%Y-%m-%d"))
-            end = utc.localize(datetime.strptime(self.date_end,"%Y-%m-%d"))
+            start = self.date_bounds.start
+            end = self.date_bounds.end
 
         tables = [
             'AlertInfo',
@@ -447,13 +450,13 @@ class MDEDataDumper(DataDumper):
         machine_names = list(findkeys(data, 'computerDnsName'))
         mapOfIds = dict(zip(machine_ids, machine_names))
 
-        end = utc.localize(datetime.now())
+        end = self.date_bounds.end
         start = end - timedelta(days=364)
 
         if self.date_range:
             self.logger.debug(f'MDE Dump using specified date range: {self.date_start} to {self.date_end}')
-            start = utc.localize(datetime.strptime(self.date_start,"%Y-%m-%d"))
-            end = utc.localize(datetime.strptime(self.date_end,"%Y-%m-%d"))
+            start = self.date_bounds.start
+            end = self.date_bounds.end
 
         tables = [
             'DeviceEvents',
@@ -542,15 +545,15 @@ class MDEDataDumper(DataDumper):
         self.ensure_token("security_api")
 
         # default end time. Now
-        end = utc.localize(datetime.now())
+        end = self.date_bounds.end
 
         # defult start tiem
         start = end - timedelta(days=364)
 
         if self.date_range:
             self.logger.debug(f'MDE Dump using specified date range: {self.date_start} to {self.date_end}')
-            start = utc.localize(datetime.strptime(self.date_start,"%Y-%m-%d"))
-            end = utc.localize(datetime.strptime(self.date_end,"%Y-%m-%d"))
+            start = self.date_bounds.start
+            end = self.date_bounds.end
 
         id_tables = ['IdentityDirectoryEvents', 'IdentityLogonEvents', 'IdentityQueryEvents']
 
@@ -664,13 +667,14 @@ class MDEDataDumper(DataDumper):
 
     async def _dump_graph_tables_helper(self, tables=[]) -> None:
         """Helper for dumping tables via Graph Security runHuntingQuery endpoint."""
-        default_end = datetime.now(timezone.utc)
+        default_end = self.date_bounds.end
         default_start = default_end - timedelta(days=364)
 
         if self.date_range:
-            self.logger.debug(f'Graph hunt using specified date range: {self.date_start} to {self.date_end}')
-            default_start = self.date_start
-            default_end = self.date_end
+            self.logger.debug(
+                'Graph hunt using specified date range: '
+                f'{to_graph_ts(self.date_bounds.start)} to {to_graph_ts(default_end)}')
+            default_start = self.date_bounds.start
 
         tasks = []
         for table in tables:
@@ -1229,7 +1233,10 @@ class MDEDataDumper(DataDumper):
         date_filter = ""
         if self.date_range:
             date_filter = f"?$filter=alertCreationTime ge {self.date_start}T00:00:00Z"
-            if self.date_end:
+            if self.date_bounds.end_is_now:
+                # Blank date_end: bound by the real UTC 'now' snapshot, not the end of a calendar day
+                date_filter += f" and alertCreationTime le {to_graph_ts(self.date_bounds.end)}"
+            elif self.date_end:
                 date_filter += f" and alertCreationTime le {self.date_end}T23:59:59Z"
 
         async def _fetch_machine(machine_id):
@@ -1437,13 +1444,12 @@ class MDEDataDumper(DataDumper):
         portal_base = self.portal_auth.get('portal_url', 'https://security.microsoft.com')
         headers = self._build_portal_headers()
 
-        end_date = datetime.utcnow()
+        # Naive-UTC datetimes: the chunking below only does arithmetic/strftime on them.
+        end_date = self.date_bounds.end.replace(tzinfo=None)
         start_date = end_date - timedelta(days=180)
 
         if self.date_range:
-            start_date = datetime.strptime(self.date_start, "%Y-%m-%d")
-            if self.date_end:
-                end_date = datetime.strptime(self.date_end, "%Y-%m-%d")
+            start_date = self.date_bounds.start.replace(tzinfo=None)
 
         # Progress bar: track machines completed
         pm = get_progress_manager()
@@ -1580,13 +1586,12 @@ class MDEDataDumper(DataDumper):
                 unique_users.append(u)
         users = unique_users
 
-        end_date = datetime.utcnow()
+        # Naive-UTC datetimes: the chunking below only does arithmetic/strftime on them.
+        end_date = self.date_bounds.end.replace(tzinfo=None)
         start_date = end_date - timedelta(days=180)
 
         if self.date_range:
-            start_date = datetime.strptime(self.date_start, "%Y-%m-%d")
-            if self.date_end:
-                end_date = datetime.strptime(self.date_end, "%Y-%m-%d")
+            start_date = self.date_bounds.start.replace(tzinfo=None)
 
         # Progress bar: track identities completed
         pm = get_progress_manager()

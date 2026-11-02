@@ -23,6 +23,7 @@ Key data sources:
 """
 
 import asyncio
+import collections
 import getpass
 import json
 import os
@@ -44,9 +45,24 @@ from azure.storage.blob import BlobServiceClient
 from goosey.datadumper import DataDumper
 from goosey.progress import get_progress_manager
 from goosey.utils import *
+from goosey.utils import (RATE_LIMIT_SLEEP_SECONDS, floor_to_day, get_incremental_lookback, iter_day_chunks,
+                          load_row_multiset, row_fingerprint, parse_graph_ts, resolve_date_bounds,
+                          resume_point, to_graph_ts, utc_now)
+from datetime import timezone
 from typing import Optional
+import re
 
 utc = pytz.UTC
+
+# Log Analytics table discovery / manifest constants (DEC-LAW-DISCOVERY-001)
+LAW_TABLE_NAME_RE = re.compile(r'^[A-Za-z][A-Za-z0-9_]*$')
+LAW_MANIFEST_NAME = '_collection_status.json'
+# Cap on simultaneous table queries per run (a workspace can have ~1,500 tables)
+LAW_MAX_CONCURRENT_QUERIES = 8
+LAW_SKIP_REASON = 'no rows in search summary for requested window; not explicitly queried'
+# Always reported in the manifest (status 'unavailable' if absent). Note: the Entra diagnostic
+# category is AzureADGraphActivityLogs; these are the two distinct LAW *table* names.
+LAW_LAB_CRITICAL_TABLES = ('AADGraphActivityLogs', 'MicrosoftGraphActivityLogs')
 
 class AzureDataDumper(DataDumper):
     """Collects Azure subscription resources and Log Analytics workspace data.
@@ -56,7 +72,8 @@ class AzureDataDumper(DataDumper):
     authenticate via ClientSecretCredential.
     """
 
-    def __init__(self, output_dir, reports_dir, session, app_auth, config, auth_un_pw, loganalytics_app_auth, debug, token_manager=None, force_repull=False):
+    def __init__(self, output_dir, reports_dir, session, app_auth, config, auth_un_pw, loganalytics_app_auth, debug, token_manager=None, force_repull=False,
+                 now=None):
         super().__init__(f'{output_dir}{os.path.sep}azure', reports_dir, app_auth, session, debug, token_manager=token_manager, endpoint_key="resource_manager", force_repull=force_repull)
         self.logger = setup_logger(__name__, debug)
         self.failurefile = os.path.join(reports_dir, '_no_results.json')
@@ -141,7 +158,11 @@ class AzureDataDumper(DataDumper):
                 self.asclocation = locationclient.locations.list().next().as_dict()
                 self.security_clients.append(SecurityCenter(credential=self.credential, subscription_id=sub_id, asc_location=self.asclocation))
 
-        self.date_range, self.date_start, self.date_end = get_date_range(config, self.logger)
+        # One UTC 'now' snapshot per dumper invocation (DEC-DATEBOUNDS-001); `now` is injectable for tests.
+        self.date_bounds = resolve_date_bounds(config, self.logger, now=now)
+        self.date_range, self.date_start, self.date_end = self.date_bounds.legacy_tuple()
+        self.lookback = get_incremental_lookback(config, self.logger)
+        self.logger.info(f'Incremental lookback on resume: {self.lookback.total_seconds() / 60:g} minutes')
 
     def _get_mgmt_url(self, path):
         """Return the management API URL based on gov/commercial cloud."""
@@ -217,8 +238,8 @@ class AzureDataDumper(DataDumper):
                                 createdAt = dateutil.parser.parse(x["systemData"]["createdAt"]).replace(tzinfo=None)
                                 # Check for date time range
                                 if self.date_range:
-                                    start = dateutil.parser.parse(self.date_start).replace(tzinfo=None)
-                                    end = dateutil.parser.parse(self.date_end).replace(tzinfo=None)
+                                    start = self.date_bounds.start.replace(tzinfo=None)
+                                    end = self.date_bounds.end.replace(tzinfo=None)
                                     if start <= createdAt and createdAt <= end:
                                         alert_ids.append(x['id'])
                                 else:
@@ -721,17 +742,20 @@ class AzureDataDumper(DataDumper):
 
         if statefile is None:
             statefile = os.path.join(self.output_dir, sub_id, '.activity_log_state')
-        start_datetime = dateutil.parser.parse(start).replace(tzinfo=None)
-        end_datetime = dateutil.parser.parse(end).replace(tzinfo=None)
-        while start_datetime < end_datetime:
-            end_time = '%sT23:59:59.999999Z' % (datetime.strptime(start, ("%Y-%m-%dT%H:%M:%S.%fZ")).date())
+        start_datetime = parse_graph_ts(start)
+        end_datetime = parse_graph_ts(end)
+        for chunk_start, chunk_end, covered_through, _full in iter_day_chunks(start_datetime, end_datetime):
+            start_s = to_graph_ts(chunk_start)
+            end_time = to_graph_ts(chunk_end)
 
-            filters = 'eventTimestamp ge %s' % (start) + ' and eventTimestamp le %s' % (end_time)
-            outfile = os.path.join(sub_directory, 'azure_activity_log_' + str(datetime.strptime(end_time, ("%Y-%m-%dT%H:%M:%S.%fZ")).date()) + '.json')
-            self.logger.debug(f'Dumping Azure Activity logs for time frame {start} to {end_time}')
+            filters = 'eventTimestamp ge %s' % (start_s) + ' and eventTimestamp le %s' % (end_time)
+            outfile = os.path.join(sub_directory, 'azure_activity_log_' + str(chunk_start.date()) + '.json')
+            self.logger.debug(f'Dumping Azure Activity logs for time frame {start_s} to {end_time}')
             activity_log = monitor_client.activity_logs
 
-            with open(outfile, 'w', encoding='utf-8') as f:
+            # A resumed partial day (chunk_start not at midnight) extends the existing file
+            mode = 'w' if chunk_start.time() == datetime.min.time() else 'a'
+            with open(outfile, mode, encoding='utf-8') as f:
                 for event in activity_log.list(filter=filters):
                     f.write(json.dumps(event.as_dict()))
                     f.write("\n")
@@ -739,11 +763,9 @@ class AzureDataDumper(DataDumper):
                     os.fsync(f)
                     await asyncio.sleep(0)  # yield to event loop
             with open(statefile, 'w') as f:
-                f.write(end_time)
+                # Exact covered-through instant; the final chunk is clipped to the resolved end
+                f.write(to_graph_ts(covered_through))
             await asyncio.sleep(0)  # yield to event loop
-
-            start = '%sT00:00:00.000000Z' % ((datetime.strptime(start, ("%Y-%m-%dT%H:%M:%S.%fZ")).date() + timedelta(days=1)).strftime("%Y-%m-%d"))
-            start_datetime = dateutil.parser.parse(start).replace(tzinfo=None)
 
     async def dump_activity_log(self) -> None:
         """
@@ -755,8 +777,9 @@ class AzureDataDumper(DataDumper):
         sub_statefile = os.path.join(self.output_dir, '.sub_savestate')
 
         # default start_date and final_time
-        start_date = '%sT00:00:00.000000Z' % ((datetime.now(utc) - timedelta(days=89)).strftime("%Y-%m-%d"))
-        final_time = '%sT00:00:00.000000Z' % ((datetime.now(utc)).strftime("%Y-%m-%d"))
+        resolved_end = self.date_bounds.end  # exclusive aware-UTC (explicit midnight, or the 'now' snapshot)
+        start_date = to_graph_ts(floor_to_day(resolved_end - timedelta(days=89)))
+        final_time = to_graph_ts(resolved_end)
 
         if os.path.isfile(sub_statefile):
             self.logger.debug(f'Subscription save state file exists at {sub_statefile}')
@@ -773,14 +796,14 @@ class AzureDataDumper(DataDumper):
                 self.logger.info(f'Activity log save state file found. Continuing from last checkpoint.')
                 with open(statefile, 'r') as reader:
                     save_state_end_time = reader.readline().strip()
-                    start_time_saved_sub = '%sT00:00:00.000000Z' % (datetime.strptime(save_state_end_time, ("%Y-%m-%dT%H:%M:%S.%fZ")).date() + timedelta(days=1))
+                    start_time_saved_sub = to_graph_ts(resume_point(save_state_end_time))
                 save_state = True
             else:
                 self.logger.info(f'Activity log save state file not found. Starting a fresh pull.')
                 subscription_id_num = 0
                 save_state = False
 
-            end_time_saved_sub = '%sT00:00:00.000000Z' % ((datetime.now(utc)).strftime("%Y-%m-%d"))
+            end_time_saved_sub = final_time
         else:
             subscription_id_num = 0
             save_state = False
@@ -788,8 +811,8 @@ class AzureDataDumper(DataDumper):
 
         if self.date_range:
             self.logger.debug(f'Date Range exists {self.date_start} - {self.date_end}')
-            self.date_start  = self.date_start + 'T00:00:00.000000Z'
-            self.date_end  = self.date_end + 'T00:00:00.000000Z'
+            range_start = to_graph_ts(self.date_bounds.start)
+            range_end = final_time
             subscription_id_num = 0
             statefile = os.path.join(self.output_dir, self.subscription_id_list[subscription_id_num], '.activity_log_state')
 
@@ -803,8 +826,8 @@ class AzureDataDumper(DataDumper):
                     await self.auxiliary_activity_log(start_time_saved_sub, end_time_saved_sub, i, statefile)
                     save_state = False
                 elif self.date_range:
-                    self.logger.debug(f'Using Date Range {self.date_start} - {self.date_end}')
-                    await self.auxiliary_activity_log(self.date_start, self.date_end, i, statefile)
+                    self.logger.debug(f'Using Date Range {range_start} - {range_end}')
+                    await self.auxiliary_activity_log(range_start, range_end, i, statefile)
                 else:
                     self.logger.debug(f'No state. Using {start_date} - {final_time}')
                     await self.auxiliary_activity_log(start_date, final_time, i, statefile)
@@ -814,25 +837,167 @@ class AzureDataDumper(DataDumper):
                 self.logger.error(f"HTTP Response Error on subscription {self.subscription_id_list[i]}: {e}")
                 continue
 
+    async def _list_workspace_tables(self, workspace_id):
+        """
+        Authoritative table list via ARM "Tables - List By Workspace" (api-version 2022-10-01).
+
+        Follows ``nextLink`` pagination, de-duplicates names by exact (case-sensitive) match,
+        preserving case and first-seen order, and skips entries that cannot be queried
+        (names that are not valid KQL identifiers, or tables being deleted).
+
+        Returns:
+            (tables, error): ``tables`` is a list of names (None on failure) and
+            ``error`` a short, secret-free summary (None on success).
+        """
+        url = f"{self.endpoints['resource_manager']}{workspace_id}/tables?api-version=2022-10-01"
+        seen = set()
+        tables = []
+        pages = 0
+        while url:
+            pages += 1
+            if pages > 1000:
+                return None, "table list pagination did not terminate"
+            self.ensure_token()
+            header = {'Authorization': '%s %s' % (self.app_auth['token_type'], self.app_auth['access_token'])}
+            result = None
+            for attempt in range(3):
+                try:
+                    async with self.ahsession.get(url, headers=header, timeout=600) as r:
+                        if r.status == 429 and attempt < 2:
+                            retry_after = int(r.headers.get('Retry-After', '5') or 5)
+                            await asyncio.sleep(min(retry_after, RATE_LIMIT_SLEEP_SECONDS))
+                            continue
+                        if r.status != 200:
+                            return None, f"HTTP {r.status} listing tables"
+                        result = await r.json()
+                        break
+                except Exception as e:
+                    return None, f"{type(e).__name__} listing tables: {str(e)[:200]}"
+            if result is None:
+                return None, "no response listing tables"
+            for item in result.get('value', []):
+                name = item.get('name')
+                props = item.get('properties') or {}
+                if not isinstance(name, str) or not LAW_TABLE_NAME_RE.match(name):
+                    self.logger.debug(f"Skipping non-queryable table entry: {name!r}")
+                    continue
+                if str(props.get('provisioningState', '')).lower() == 'deleting':
+                    self.logger.debug(f"Skipping table {name}: provisioningState Deleting")
+                    continue
+                if name in seen:
+                    continue
+                seen.add(name)
+                tables.append(name)
+            url = result.get('nextLink')
+        return tables, None
+
+    async def _discover_law_tables(self, workspace_id, workspace_name, query_url, start, end):
+        """
+        Table discovery for one workspace.
+
+        The ARM tables API is authoritative for what exists (including empty tables).
+        ONE ``search "*"`` summarize over the resolved window then tells us which tables
+        actually hold data, so we avoid explicitly querying ~1,500 empty tables
+        (DEC-LAW-DATABEARING-001). If the tables API fails, a WARNING is logged and the
+        search result doubles as the table list (it cannot see empty tables).
+
+        Returns:
+            (tables, method, error, data_bearing, data_check):
+            ``method`` is 'tables_api' or 'search_fallback'; ``data_bearing`` is a list
+            of table names with rows in the window, or None if the search failed;
+            ``data_check`` is 'search_summary' or 'search_failed'.
+        """
+        tables, err = await self._list_workspace_tables(workspace_id)
+        if tables is None:
+            self.logger.warning(
+                f"Log Analytics workspace {workspace_name}: table listing failed ({err}); "
+                "falling back to search discovery, which cannot see empty tables.")
+        results, qerr, _, _ = await run_kql_query(
+            "search \"*\"", start, end, None, query_url, self.loganalytics_app_auth,
+            self.logger, self.ahsession, summarize=True)
+        search_failed = bool(qerr) or results is None
+        data_bearing = None
+        if search_failed:
+            why = str(qerr)[:200] if qerr else "empty or malformed response"
+            self.logger.warning(
+                f"Log Analytics workspace {workspace_name}: search summary failed ({why}); "
+                "all listed tables will be queried explicitly.")
+            if tables is None:
+                err = f"{err}; search discovery failed: {why}"
+        else:
+            data_bearing = []
+            seen = set()
+            for row in results:
+                self.logger.debug(row)
+                table = row.get("$table")
+                if table and table not in seen:
+                    seen.add(table)
+                    data_bearing.append(table)
+        data_check = 'search_failed' if search_failed else 'search_summary'
+        if tables is not None:
+            return tables, 'tables_api', None, data_bearing, data_check
+        return list(data_bearing or []), 'search_fallback', err, data_bearing, data_check
+
+    def _write_law_manifest(self, workspace_log_dir, workspace_name, workspace_id, customer_id, method, derr,
+                            entries, data_check=None):
+        """Atomically (temp file + os.replace) write _collection_status.json for one workspace."""
+        manifest = {
+            "schema_version": 1,
+            "generated_at": to_graph_ts(utc_now()),
+            "workspace_name": workspace_name,
+            "workspace_resource_id": workspace_id,
+            "workspace_customer_id": customer_id,
+            "discovery_method": method,
+            "discovery_error": derr,
+            "data_check": data_check,
+            "lookback_minutes": self.lookback.total_seconds() / 60,
+            "tables": entries,
+        }
+        path = os.path.join(workspace_log_dir, LAW_MANIFEST_NAME)
+        tmp = path + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(manifest, f, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        return path
+
     async def dump_log_analytic_workspaces(self):
         """
-        Dump list of log analytic workspaces and their table contents
+        Dump list of log analytic workspaces and their table contents.
+
+        Tables are discovered from the ARM tables API (so empty tables are known),
+        queried through the Log Analytics endpoint, and each workspace gets a
+        ``_collection_status.json`` manifest (see _write_law_manifest) recording
+        per-table success / failed / unavailable.
+
+        @decision DEC-LAW-DISCOVERY-001
+        @title Authoritative LAW table discovery with explicit per-table outcomes
+        @status accepted
+        @rationale ``search "*"`` only reveals tables with rows, so lab-critical
+          tables (AADGraphActivityLogs, MicrosoftGraphActivityLogs) that are empty
+          or absent were indistinguishable from failed queries. The ARM tables list
+          gives the real inventory; each table query reports an outcome so a failed
+          query is never recorded as an empty success.
         """
         self.ensure_token("log_analytics_api")
-        # default end time. Now
-        end = utc.localize(datetime.now())
+        # End = the resolved bound: explicit exclusive midnight, or the one UTC 'now'
+        # snapshot taken when this dumper was created (DEC-DATEBOUNDS-001).
+        end = self.date_bounds.end
 
-        # defult start tiem
+        # default start time
         # For LAW 12 years is the maximum storage period
         start = end - timedelta(days=364*12)
 
         if self.date_range:
-            self.logger.debug(f'MDE Dump using specified date range: {self.date_start} to {self.date_end}')
-            start = dateutil.parser.parse(self.date_start).replace(tzinfo=utc)
-            end = dateutil.parser.parse(self.date_end).replace(tzinfo=utc)
+            self.logger.debug(
+                f'LAW dump using specified date range: {to_graph_ts(self.date_bounds.start)} to {to_graph_ts(end)}')
+            start = self.date_bounds.start
 
         # Discover all tables across all workspaces, then create a single progress bar
         table_tasks = []  # list of (table, table_start, table_end, url, statefile, outfile) tuples
+        workspace_meta = []  # one dict per workspace; drives manifest writing after the queries finish
         for subscriptionId in self.subscription_id_list:
             url = f"{self.endpoints['resource_manager']}/subscriptions/{subscriptionId}/providers/Microsoft.OperationalInsights/"
             self.logger.debug(url)
@@ -846,36 +1011,67 @@ class AzureDataDumper(DataDumper):
                 return
             with open(workspaces_file, "r") as f:
                 for line in f:
+                    if not line.strip():
+                        continue
                     workspace_dict = json.loads(line)
                     workspace_name = workspace_dict["name"]
                     workspace_id = workspace_dict["id"]
+                    customer_id = (workspace_dict.get("properties") or {}).get("customerId")
                     self.logger.debug(f"summarizing {workspace_name}")
                     query_url = f"{self.endpoints['log_analytics_api']}/v1{workspace_id}/query"
-                    results, err, _, _ = await run_kql_query("search \"*\"", start, end, None, query_url, self.loganalytics_app_auth, self.logger, self.ahsession, summarize=True)
-                    for row in results:
-                        self.logger.debug(row)
-                        table = row["$table"]
+                    workspace_log_dir = os.path.join(output_dir, workspace_name)
+                    check_output_dir(workspace_log_dir, self.logger)
 
-                        workspace_log_dir = os.path.join(output_dir, workspace_name)
-                        check_output_dir(workspace_log_dir, self.logger)
-
+                    tables, method, derr, data_bearing, data_check = await self._discover_law_tables(
+                        workspace_id, workspace_name, query_url, start, end)
+                    # Query explicitly: listed AND (data-bearing OR lab-critical), plus data-bearing
+                    # tables the list missed. If the summary search failed, query every listed table.
+                    listed = set(tables)
+                    if data_bearing is None:
+                        to_query = list(tables)
+                    else:
+                        have_data = set(data_bearing)
+                        to_query = [t for t in tables if t in have_data or t in LAW_LAB_CRITICAL_TABLES]
+                        to_query += [t for t in data_bearing if t not in listed]
+                    queried = set(to_query)
+                    skipped = [t for t in tables if t not in queried]
+                    self.logger.info(
+                        f"Log Analytics workspace {workspace_name}: discovered {len(tables)} table(s) via {method}; "
+                        f"data-bearing {'unknown' if data_bearing is None else len(data_bearing)}; "
+                        f"explicitly querying {len(to_query)}; skipped {len(skipped)}")
+                    meta = {"dir": workspace_log_dir, "name": workspace_name, "id": workspace_id,
+                            "customer_id": customer_id, "method": method, "derr": derr, "tables": {},
+                            "window": (start, end), "data_check": data_check, "skipped": skipped}
+                    workspace_meta.append(meta)
+                    for table in to_query:
                         statefile = os.path.join(workspace_log_dir, f".{table}.savestate")
                         outfile = os.path.join(workspace_log_dir, f"{table}.json")
                         saved_end = load_state(statefile)
                         table_start = start
                         table_end = end
+                        resumed = False
                         if saved_end:
-                            table_start = max(saved_end, table_start)
-                        self.logger.debug(f"Generating table dump task for table: {table}, start: {start}, end: {end}")
-                        table_tasks.append((table, table_start, table_end, query_url, statefile, outfile))
+                            if saved_end.tzinfo is None:
+                                saved_end = saved_end.replace(tzinfo=timezone.utc)
+                            # Resume with a lookback: late-ingested rows may predate the checkpoint
+                            table_start = max(saved_end - self.lookback, table_start)
+                            resumed = True
+                        meta["tables"][table] = {"start": table_start, "end": table_end, "outfile": outfile,
+                                                 "resumed": resumed}
+                        self.logger.debug(
+                            f"Generating table dump task for table: {table}, start: {table_start}, end: {table_end}")
+                        table_tasks.append((table, table_start, table_end, query_url, statefile, outfile, meta,
+                                            resumed))
 
         if not table_tasks:
+            for meta in workspace_meta:
+                self._finalize_law_workspace(meta)
             return
 
         # Single progress bar: total = sum of hours across all tables
         pm = get_progress_manager()
         table_hours = []
-        for _, ts, te, _, _, _ in table_tasks:
+        for _, ts, te, _, _, _, _, _ in table_tasks:
             secs = max(int((te - ts).total_seconds()), 1)
             table_hours.append(max(secs // 3600, 1))
         total_hours = sum(table_hours)
@@ -889,13 +1085,23 @@ class AzureDataDumper(DataDumper):
         # Shared mutable progress state for all table tasks
         law_progress = {"bar": bar, "pm": pm, "bar_name": bar_name, "hours_done": 0, "total_hours": total_hours}
 
+        sem = asyncio.Semaphore(LAW_MAX_CONCURRENT_QUERIES)
         tasks = []
-        for i, (table, ts, te, qurl, sf, of) in enumerate(table_tasks):
+        for i, (table, ts, te, qurl, sf, of, _meta, resumed) in enumerate(table_tasks):
             caller_name = asyncio.current_task().get_name()
             tasks.append(asyncio.create_task(
-                self._dump_table(table, ts, te, qurl, statefile=sf, outfile=of, law_progress=law_progress, table_total_hours=table_hours[i]),
+                self._bounded(sem, self._dump_table(
+                    table, ts, te, qurl, statefile=sf, outfile=of, law_progress=law_progress,
+                    table_total_hours=table_hours[i], resumed=resumed)),
                 name=f"{caller_name}_{table}"))
-        await asyncio.gather(*tasks)
+        outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+        for (table, _ts, _te, _q, _sf, _of, meta, _r), outcome in zip(table_tasks, outcomes):
+            if isinstance(outcome, BaseException):
+                outcome = {"status": "failed", "row_count": None, "duplicates_skipped": 0,
+                           "error": f"{type(outcome).__name__}: {str(outcome)[:200]}"}
+            meta["tables"][table]["outcome"] = outcome
+        for meta in workspace_meta:
+            self._finalize_law_workspace(meta)
 
         # Mark the single bar complete
         if bar:
@@ -906,8 +1112,67 @@ class AzureDataDumper(DataDumper):
             pm.complete_task(bar_name)
     dump_log_analytic_workspaces._manages_own_progress = True
 
+    @staticmethod
+    async def _bounded(sem, coro):
+        """Run ``coro`` while holding ``sem`` (caps concurrent Log Analytics queries)."""
+        async with sem:
+            return await coro
 
-    async def _dump_table(self, base_query, start, end, url, statefile, outfile, retries=3, law_progress=None, table_total_hours=None):
+    def _finalize_law_workspace(self, meta):
+        """Build manifest entries for one workspace, touch empty artifacts, log lab-critical status,
+        and write the manifest."""
+        entries = []
+        by_fold = {}
+        for table, info in meta["tables"].items():
+            outcome = info.get("outcome") or {"status": "failed", "row_count": None, "error": "table query did not run"}
+            artifact = None
+            if outcome["status"] == "success":
+                # Deterministic artifact even with zero rows; append mode never truncates earlier data.
+                open(info["outfile"], 'a', encoding='utf-8').close()
+                artifact = f"{table}.json"
+            entry = {"table": table,
+                     "requested_start": to_graph_ts(info["start"]),
+                     "requested_end": to_graph_ts(info["end"]),
+                     "status": outcome["status"],
+                     "row_count": outcome["row_count"] if outcome["status"] == "success" else None,
+                     "duplicates_skipped": outcome.get("duplicates_skipped", 0),
+                     "artifact": artifact,
+                     "error": outcome.get("error") if outcome["status"] != "success" else None}
+            entries.append(entry)
+            by_fold[table] = entry
+        for table in meta.get("skipped", []):
+            entries.append({"table": table,
+                            "requested_start": to_graph_ts(meta["window"][0]),
+                            "requested_end": to_graph_ts(meta["window"][1]),
+                            "status": "skipped", "row_count": None, "duplicates_skipped": 0, "artifact": None,
+                            "error": LAW_SKIP_REASON})
+            by_fold[table] = entries[-1]
+        for critical in LAW_LAB_CRITICAL_TABLES:
+            if critical in by_fold:
+                continue
+            if meta["method"] == 'tables_api':
+                why = "table not present in workspace table list"
+            else:
+                why = f"discovery failed: {meta['derr']}; table had no rows in search fallback"
+            entries.append({"table": critical,
+                            "requested_start": to_graph_ts(meta["window"][0]),
+                            "requested_end": to_graph_ts(meta["window"][1]),
+                            "status": "unavailable", "row_count": None, "duplicates_skipped": 0,
+                            "artifact": None, "error": why})
+            by_fold[critical] = entries[-1]
+        for critical in LAW_LAB_CRITICAL_TABLES:
+            e = by_fold[critical]
+            detail = f" ({e['error']})" if e['error'] else ""
+            self.logger.info(f"Log Analytics workspace {meta['name']}: {critical} "
+                             f"status={e['status']} row_count={e['row_count']}{detail}")
+        self._write_law_manifest(meta["dir"], meta["name"], meta["id"], meta["customer_id"],
+                                 meta["method"], meta["derr"], entries,
+                                 data_check=meta.get("data_check"))
+
+
+
+    async def _dump_table(self, base_query, start, end, url, statefile, outfile, retries=3, law_progress=None,
+                          table_total_hours=None, resumed=False):
         """
         Query the log analytics workspace and pull logs for the table under the timeframe.
 
@@ -921,8 +1186,22 @@ class AzureDataDumper(DataDumper):
             retries: max retry attempts
             law_progress: shared dict with 'bar', 'pm', 'bar_name', 'hours_done', 'total_hours'
             table_total_hours: this table's share of the total hours in the progress bar
+            resumed: True when ``start`` was moved back by the lookback; rows already stored in
+                ``outfile`` from ``start`` on are then skipped (multiset match) instead of re-written
+
+        Returns:
+            dict {"status": "success"|"failed", "row_count": int|None, "error": str|None}.
+            ``success`` means the table query ran to the end of the requested window
+            (row_count is the number of rows written this run, possibly 0); ``failed``
+            means it errored and must not be read as "empty".
         """
         totalResultCount = 0
+        last_err = None
+        rows_written = 0
+        duplicates_skipped = 0
+        # Rows re-fetched in the lookback overlap cancel stored copies one-for-one, so genuine
+        # source duplicates (same row twice) are preserved while re-fetches are not re-written.
+        existing = load_row_multiset(outfile, start) if resumed else collections.Counter()
         totalResultEnd = start
         totalSavedResults = 0
         origStart = start
@@ -974,21 +1253,25 @@ class AzureDataDumper(DataDumper):
             # If there are no results then we want to get to a timeframe that does contain results
             if err:
                 tries += 1
-            elif summary != None and summary[0]["Count"] == 0:
+                last_err = str(err)[:300]
+            elif not summary:
+                tries += 1
+                last_err = "empty or malformed response from Log Analytics"
+            elif summary[0]["Count"] == 0:
                 tries = 0
                 # Check if there are no results in the whole time range. If so we return
                 if origStart == start and finalEnd == end:
                     self.logger.debug(f"No logs for {base_query} from {start} to {end}")
-                    save_state(statefile, end)
+                    save_state(statefile, min(end, finalEnd))
                     _complete_progress()
-                    return
+                    return {"status": "success", "row_count": 0, "duplicates_skipped": 0, "error": None}
                 # Otherwise it just means this lower time segment has no logs and we remove it and continue
                 start = end
                 end = finalEnd
                 bounds = [final_record]
                 _update_progress(start)
                 continue
-            elif summary != None and summary[0]["Count"] > 0:
+            elif summary[0]["Count"] > 0:
                 tries = 0
                 totalResultCount = summary[0]["Count"]
                 totalResultEnd = end
@@ -1010,8 +1293,9 @@ class AzureDataDumper(DataDumper):
             if bounds[0]["count"] == None or \
                (bounds[0]["count"] >= LAW_QUERY_THRESHOLD and end <= bounds[0]["end"]):
                 summary, err, end, bounds = await run_kql_query(base_query, start, end, bounds, url, self.loganalytics_app_auth, self.logger, self.ahsession, summarize=True)
-                if err:
+                if err or not summary:
                     tries += 1
+                    last_err = str(err)[:300] if err else "empty or malformed response from Log Analytics"
                     continue
                 tries = 0
                 if summary[0]["Count"] >= LAW_QUERY_THRESHOLD:
@@ -1023,19 +1307,30 @@ class AzureDataDumper(DataDumper):
                     continue
 
             results, err, end, bounds = await run_kql_query(base_query, start, end, bounds, url, self.loganalytics_app_auth, self.logger, self.ahsession)
-            if err:
+            if err or results is None:
                 tries += 1
+                last_err = str(err)[:300] if err else "empty or malformed response from Log Analytics"
                 continue
             if len(results) >= 0:
                 if start >= totalResultEnd:
                     totalResultCount += len(results)
                 #self.logger.debug('Size of table: %s' % len(results))
                 #self.logger.debug('Size of table: %s' % result['Stats']['dataset_statistics'][0]['table_row_count'])
+                fresh = []
+                for x in results:
+                    key = row_fingerprint(x) if existing else None
+                    if key is not None and existing[key] > 0:
+                        existing[key] -= 1
+                        duplicates_skipped += 1
+                        continue
+                    fresh.append(x)
                 with open(outfile, 'a', encoding='utf-8') as f:
-                    for x in results:
+                    for x in fresh:
                         f.write(json.dumps(x) + '\n')
+                rows_written += len(fresh)
 
-                save_state(statefile, end)
+                # Never checkpoint coverage beyond the resolved end of this run
+                save_state(statefile, min(end, finalEnd))
                 _update_progress(end)
 
                 tries = 0
@@ -1047,6 +1342,13 @@ class AzureDataDumper(DataDumper):
 
         # Mark this table's share of progress complete
         _complete_progress()
+
+        if start < finalEnd and tries >= retries:
+            self.logger.warning(f"Log Analytics table {base_query}: query failed ({last_err}); not recorded as empty.")
+            return {"status": "failed", "row_count": None, "duplicates_skipped": duplicates_skipped,
+                    "error": last_err or "query failed"}
+        return {"status": "success", "row_count": rows_written, "duplicates_skipped": duplicates_skipped,
+                "error": None}
 
 
     async def auxiliary_storage_log_pull(self, container_name, log_type):
@@ -1077,11 +1379,10 @@ class AzureDataDumper(DataDumper):
                         blob_service_client = BlobServiceClient(account_url=url, credential=self.credential)
                     try:
                         container_client = blob_service_client.get_container_client(container=container_name)
-                        start_date = utc.localize((datetime.now() - timedelta(days=365*2)))
-                        end_date = utc.localize(datetime.now())
+                        end_date = self.date_bounds.end
+                        start_date = end_date - timedelta(days=365*2)
                         if self.date_range:
-                            start_date = dateutil.parser.parse(self.date_start).replace(tzinfo=utc)
-                            end_date = dateutil.parser.parse(self.date_end).replace(tzinfo=utc)
+                            start_date = self.date_bounds.start
                         for blob in container_client.list_blobs():
                             # Check the save state
                             if str(blob.name) in save_state_set:
@@ -1167,14 +1468,15 @@ class AzureDataDumper(DataDumper):
         # VNet flow log tables: NTANetAnalytics (standard) and NTANetAnalytics_CL (custom)
         vnet_flow_tables = ["NTANetAnalytics", "NTANetAnalytics_CL"]
 
-        end = utc.localize(datetime.now())
+        end = self.date_bounds.end
         # VNet flow logs retention: up to 2 years by default; use 2 years as default window
         start = end - timedelta(days=365 * 2)
 
         if self.date_range:
-            self.logger.debug(f'VNet flow logs dump using specified date range: {self.date_start} to {self.date_end}')
-            start = dateutil.parser.parse(self.date_start).replace(tzinfo=utc)
-            end = dateutil.parser.parse(self.date_end).replace(tzinfo=utc)
+            self.logger.debug(
+                'VNet flow logs dump using specified date range: '
+                f'{to_graph_ts(self.date_bounds.start)} to {to_graph_ts(end)}')
+            start = self.date_bounds.start
 
         tasks = []
         for subscriptionId in self.subscription_id_list:
@@ -1230,11 +1532,14 @@ class AzureDataDumper(DataDumper):
                         saved_end = load_state(statefile)
                         table_start = start
                         table_end = end
+                        resumed = False
                         if saved_end:
-                            table_start = max(saved_end, table_start)
+                            table_start = max(saved_end - self.lookback, table_start)
+                            resumed = True
                         caller_name = asyncio.current_task().get_name()
                         tasks.append(asyncio.create_task(
-                            self._dump_table(table, table_start, table_end, query_url, statefile=statefile, outfile=outfile),
+                            self._dump_table(table, table_start, table_end, query_url, statefile=statefile,
+                                             outfile=outfile, resumed=resumed),
                             name=f"{caller_name}_{workspace_name}_{table}"
                         ))
 

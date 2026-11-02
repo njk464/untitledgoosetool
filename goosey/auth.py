@@ -21,6 +21,7 @@ import time
 
 from collections import namedtuple
 from goosey.utils import *
+from goosey.secrets_env import resolve_encryption_pw
 
 green = "\x1b[1;32m"
 
@@ -470,8 +471,9 @@ class Authentication():
             self.config = args.config
 
         if not self.insecure:
-            if self.encryption_pw is None:
-                self.encryption_pw = getpass.getpass("Please type the password for file encryption: ")
+            # --encryption_pw > GOOSEY_ENCRYPTION_PW > prompt
+            self.encryption_pw = resolve_encryption_pw(
+                self.encryption_pw, prompt="Please type the password for file encryption: ")
         auth_config_str = read_auth(self.auth, logger=self.logger, encryption_pw=self.encryption_pw)
 
         # Read in authconfig or prompt for user info
@@ -585,7 +587,7 @@ def auth(authfile=".ugt_auth",
         debug: Enable debug logging
         d4iot: Run the authentication portion for d4iot
         insecure: Disable secure authentication handling (file encryption)
-        encryption_pw: password used for auth file encryption. SHOULD ONLY BE USED WITH AUTOHONK
+        encryption_pw: auth file password; prefer env var GOOSEY_ENCRYPTION_PW (arg shows in shell history)
     """
     args = dict2obj(locals())
     auth = Authentication(debug=debug)

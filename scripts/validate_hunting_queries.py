@@ -55,7 +55,7 @@ VALID_CATEGORIES = {
     "entra_id": {"sign_in", "config"},
     "m365": {"ual"},
     "mde": {"alerts"},
-    "azure": {"activity"},
+    "azure": {"activity", "law"},
 }
 
 # ---------------------------------------------------------------------------

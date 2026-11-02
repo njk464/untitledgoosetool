@@ -65,6 +65,11 @@ def sample_output_dir(tmp_path):
     (signin_dir / "signin_log_20260101.json").write_text('{"id": "s1"}\n')
     (signin_dir / "signin_log_20260102.jsonl").write_text('{"id": "s2"}\n')
 
+    # Real collector layout: entraid/signin_<source>/<source>_signin_log_<date>.json
+    real_dir = tmp_path / "entraid" / "signin_rt"
+    real_dir.mkdir(parents=True)
+    (real_dir / "rt_signin_log_2026-01-01.json").write_text('{"id": "s3"}\n')
+
     # Azure subscription dir with a resource file
     azure_sub = tmp_path / "azure" / "sub-abc123"
     azure_sub.mkdir(parents=True)

@@ -33,6 +33,7 @@ def main():
                "d4iot": d4iot,
                "setup": setup,
                "web": web,
+               "version": version,
                "--version": version})
 if __name__ == "__main__":
     main()
