@@ -62,10 +62,26 @@ Untitled Goose Tool (Goosey) is a CISA-published hunt and incident response tool
 | 2026-07-09 | DEC-EDISC-002 | ediscovery | Copilot logs via BOTH aiInteractionHistory (read-only) AND the eDiscovery export pipeline | aiInteractionHistory returns structured prompt/response JSON read-only (non-invasive); eDiscovery search covers it in the unified export flow |
 | 2026-07-09 | DEC-EDISC-003 | ediscovery | Content export as a single resumable orchestrator, double-gated (toggle off + ediscovery_export_confirm) | Export WRITES to the tenant; a hard confirm gate + dry-run safety prevents accidental case creation. Sequential pipeline avoids racy shared-case creation. |
 | 2026-07-09 | DEC-EDISC-004 | ediscovery | Targeted export via custodians (allCaseCustodians); tenant-wide (allTenantMailboxes/Sites) as default | Matches "targeted, default all"; custodian sources are the simplest reliable targeting path |
+| 2026-11-02 | DEC-LAB-001 | cyberfire-lab | Encryption password precedence: --encryption_pw > GOOSEY_ENCRYPTION_PW > prompt; empty = unset | Non-interactive student runs without exposing the secret in process args; one helper (goosey/secrets_env.py) for all call sites |
 
 ---
 
 ## Active Initiatives
+
+### cyberfire-lab — CyberFire Goose Lab readiness (2026-11-03)
+
+Patch release 2.2.0 so students can collect Entra sign-in/audit logs and Azure LAW tables (incl. AADGraphActivityLogs) with a clear success/failure signal. Branch `feature/cyberfire-lab`.
+
+Work items:
+- **A. Collection correctness** -- blank `date_end` = current UTC time; LAW authoritative table discovery with search fallback, empty-table artifacts, `_collection_status.json` manifest; AADGraphActivityLogs sourcetype.
+- **B. Hunting/HQL** -- ROADrecon AAD Graph burst and Azure CLI legacy AAD Graph token-acquisition hunts; HQL summarize/nested-field fixes; sign-in hunt glob fix.
+- **C. Release and student UX** -- `GOOSEY_ENCRYPTION_PW` (DEC-LAB-001), single-source version 2.2.0, `requirements-dev.txt`/`MANIFEST.in`, CHANGELOG, `docs/CYBERFIRE_QUICKSTART.md`, eDiscovery export download default off.
+
+**Status:** in-progress (uncommitted in worktree; pending tester verification and Guardian).
+
+Decisions: DEC-LAB-001 (env var password precedence).
+
+---
 
 ### ediscovery — Microsoft Purview eDiscovery collection module
 

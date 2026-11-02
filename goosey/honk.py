@@ -33,6 +33,7 @@ from goosey.ediscovery_datadumper import EdiscoveryDataDumper
 from goosey.m365_datadumper import M365DataDumper
 from goosey.mde_datadumper import MDEDataDumper
 from goosey.utils import *
+from goosey.secrets_env import resolve_encryption_pw, redact
 from goosey.auth import auth as gooseyauth, TokenManager
 from goosey.progress import init_progress_manager
 
@@ -194,7 +195,7 @@ def parse_config(configfile, args, auth=None):
                 init_sections.append(section)
 
     # CLI flags override .conf: enable ALL dump_* methods for the specified platform
-    logger.debug(args.__dict__)
+    logger.debug(redact(args.__dict__))
     if args.azure:
         for item in [x.replace('dump_', '') for x in dir(AzureDataDumper) if x.startswith('dump_')]:
             data_calls['azure'][item] = True
@@ -298,7 +299,7 @@ def honk(authfile=".ugt_auth",
         ediscovery: Set all of the eDiscovery calls to true
         force_repull: Ignore save states for snapshot (non-time-based) dumpers and re-pull all data
         insecure: Disable secure authentication handling (file encryption)
-        encryption_pw: Password for the auth file encryption (prompted if not provided)
+        encryption_pw: Auth file password; prefer env var GOOSEY_ENCRYPTION_PW (this arg shows in shell history)
         tenant: Override tenant ID from .conf
         gcc: Override GCC setting (true/false)
         gcc_high: Override GCC High setting (true/false)
@@ -327,12 +328,15 @@ def honk(authfile=".ugt_auth",
     logger = setup_logger(__name__, args.debug)
 
     # Prompt for encryption password if needed and not provided
-    if not insecure and encryption_pw is None:
-        dir_path = os.path.dirname(os.path.realpath(auth))
-        encrypted_auth = os.path.join(dir_path, auth + '.aes')
-        if os.path.isfile(encrypted_auth):
-            encryption_pw = getpass.getpass("Please type the password for file encryption: ")
-            args.encryption_pw = encryption_pw
+    # Precedence: --encryption_pw > GOOSEY_ENCRYPTION_PW env var > interactive prompt
+    if not insecure:
+        encryption_pw = resolve_encryption_pw(encryption_pw)
+        if encryption_pw is None:
+            dir_path = os.path.dirname(os.path.realpath(auth))
+            encrypted_auth = os.path.join(dir_path, auth + '.aes')
+            if os.path.isfile(encrypted_auth):
+                encryption_pw = resolve_encryption_pw(prompt="Please type the password for file encryption: ")
+        args.encryption_pw = encryption_pw
 
     # Authenticate to all endpoints before collecting
     gooseyauth(

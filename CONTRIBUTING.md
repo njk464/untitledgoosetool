@@ -26,6 +26,19 @@ one.
 
 If you would like to submit a pull request, please submit it [here](https://github.com/cisagov/untitledgoosetool/pulls).
 
+## Development setup ##
+
+```sh
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements-dev.txt   # pytest, ruff, build
+pip install -e .
+python -m pytest tests/ -q
+ruff check goosey tests
+```
+
+The package version lives only in `goosey/__init__.py`; `setup.py` reads it
+from there.
+
 ## Public domain ##
 
 This project is in the public domain within the United States, and

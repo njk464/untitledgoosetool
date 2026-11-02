@@ -11,6 +11,7 @@ import fire
 from docstring_parser import parse
 from docstring_parser.common import DocstringStyle
 from goosey.utils import *
+from goosey.secrets_env import resolve_encryption_pw
 
 from goosey.entra_id_datadumper import EntraIdDataDumper
 from goosey.d4iot_dumper import DefenderIoTDumper
@@ -78,7 +79,7 @@ def genconf(outpath_auth=".auth",
             variable_ediscovery_export_site_targets=None,
             variable_ediscovery_case_name="UntitledGooseTool",
             variable_ediscovery_export_format="pst",
-            variable_ediscovery_export_download=True,
+            variable_ediscovery_export_download=False,
             variable_ediscovery_content_query=None,
             azure=False,
             entraid=False,
@@ -152,7 +153,7 @@ def genconf(outpath_auth=".auth",
         dict_config: dictionary of config values you want to set. Will only update valid config parameters. e.g. {"azure": {"activity_log": True}}
         d4iot_dict_config: dictionary of config values you want to set. Will only update valid config parameters. e.g. {"d4iot": {"mgmt_alerts": True}}
         new: Overwrite the existing config. Default will not overwrite existing configs, but will update config info if out of date
-        insecure: Disable secure authentication handling (file encryption)
+        insecure: Disable secure authentication handling (file encryption). Password from env GOOSEY_ENCRYPTION_PW
         debug: Enable debug logging
     """
     if dict_config is None:
@@ -186,7 +187,8 @@ def genconf(outpath_auth=".auth",
         auth_s = genconfstring(args, docstring_params, "auth", "auth_")
         encryption_pw = None
         if not args["insecure"]:
-            encryption_pw = getpass.getpass("Please create a password for file encryption: ")
+            # GOOSEY_ENCRYPTION_PW takes precedence over prompting
+            encryption_pw = resolve_encryption_pw(prompt="Please create a password for file encryption: ")
         write_auth(outpath_auth, auth_s, logger=logger, encryption_pw=encryption_pw, insecure=args["insecure"])
         logger.debug("auth config created")
     else:

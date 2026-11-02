@@ -220,8 +220,18 @@ def validate(inputs_path: str, registry_path: str, dumpers_root: str | None = No
     warnings = []
 
     print(f"Loading inputs.conf from: {inputs_path}")
-    conf_sourcetypes = parse_inputs_conf_sourcetypes(inputs_path)
-    print(f"  Found {len(conf_sourcetypes)} sourcetypes in inputs.conf")
+    if Path(inputs_path).is_file():
+        conf_sourcetypes = parse_inputs_conf_sourcetypes(inputs_path)
+        print(f"  Found {len(conf_sourcetypes)} sourcetypes in inputs.conf")
+    else:
+        # conf/inputs.conf is not tracked in this repository; the registry is
+        # maintained directly.  Skip the inputs.conf cross-checks (1, 2, 4)
+        # instead of crashing so the structural checks still run.
+        conf_sourcetypes = set()
+        warnings.append(
+            f"inputs.conf not found at {inputs_path}; skipped inputs.conf cross-checks"
+        )
+        print("  (not found; cross-checks skipped)")
 
     print(f"Loading sourcetypes.json from: {registry_path}")
     with open(registry_path, "r", encoding="utf-8") as f:

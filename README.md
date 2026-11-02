@@ -41,6 +41,8 @@ This tool was designed to assist incident response teams by exporting cloud arti
 
 For more guidance on how to use Untitled Goose Tool, please see: [Untitled Goose Tool Fact Sheet](https://www.cisa.gov/resources-tools/resources/untitled-goose-tool-fact-sheet)
 
+> **Running the CyberFire Goose Lab?** Start with the [student quickstart](docs/CYBERFIRE_QUICKSTART.md).
+
 ## Getting Started
 
 ### Prerequisites
@@ -164,6 +166,16 @@ Additionally the script can delete the Application when you are done using it
 ```powershell
 PS > Write-Host "Creating a new Goose Application and Users"
 PS > ./Create_SP.ps1 -AppName GooseApp -Delete
+```
+
+### Developing and testing
+
+```sh
+pip install -r requirements-dev.txt   # pytest, ruff, build
+pip install -e .
+python -m pytest tests/ -q
+ruff check goosey tests
+python -m build                        # sdist + wheel (templates and data files are included)
 ```
 
 ### Installing
@@ -439,7 +451,7 @@ FLAGS
         Authenticate with the user credentials and collect the session tokens
 ```
 
-Run with defaults. By default it will encrypt the credentials/tokens with a prompted password. If the fields are not defined in the config then it will prompt for those as well:
+Run with defaults. By default it will encrypt the credentials/tokens with a password. The password is taken from the `GOOSEY_ENCRYPTION_PW` environment variable if set (preferred; non-interactive), otherwise you are prompted. The `--encryption_pw` argument also works but exposes the password in process arguments and shell history. Precedence: `--encryption_pw`, then `GOOSEY_ENCRYPTION_PW`, then prompt. If the fields are not defined in the config then it will prompt for those as well:
 ```sh
 $ goosey auth
 ```

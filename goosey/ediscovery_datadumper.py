@@ -42,6 +42,7 @@ import os
 from datetime import datetime
 from goosey.datadumper import DataDumper
 from goosey.utils import *
+from goosey.utils import resolve_date_bounds, to_graph_ts
 
 # Base path for the eDiscovery API under the Graph v1.0 endpoint.
 EDISCOVERY_CASES_PATH = "security/cases/ediscoveryCases"
@@ -92,7 +93,8 @@ class EdiscoveryDataDumper(DataDumper):
     per call).
     """
 
-    def __init__(self, output_dir, reports_dir, app_auth, session, config, debug, token_manager=None, force_repull=False):
+    def __init__(self, output_dir, reports_dir, app_auth, session, config, debug, token_manager=None, force_repull=False,
+                 now=None):
         super().__init__(f'{output_dir}{os.path.sep}ediscovery', reports_dir, app_auth, session, debug, token_manager=token_manager, endpoint_key="graph_api", force_repull=force_repull)
         self.logger = setup_logger(__name__, debug)
         self.gcc = config_get(config, 'config', 'gcc', self.logger).lower() == "true"
@@ -100,7 +102,9 @@ class EdiscoveryDataDumper(DataDumper):
         endpoints = get_endpoints(gcc=self.gcc, gcc_high=self.gcc_high)
         self.graph_url = endpoints["graph_api"]
         self.failurefile = os.path.join(reports_dir, '_no_results.json')
-        self.date_range, self.date_start, self.date_end = get_date_range(config, self.logger)
+        # One UTC 'now' snapshot per dumper invocation (DEC-DATEBOUNDS-001); `now` is injectable for tests.
+        self.date_bounds = resolve_date_bounds(config, self.logger, now=now)
+        self.date_range, self.date_start, self.date_end = self.date_bounds.legacy_tuple()
 
         # Phase 2 export options (live in [variables], like ual_*/mde_*). Read quietly:
         # these are usually absent and config_get would warn on every run.
@@ -302,7 +306,8 @@ class EdiscoveryDataDumper(DataDumper):
 
         params = None
         if self.date_range:
-            params = {'$filter': 'createdDateTime gt %sT00:00:00Z and createdDateTime lt %sT00:00:00Z' % (self.date_start, self.date_end)}
+            params = {'$filter': 'createdDateTime gt %s and createdDateTime lt %s' % (
+                to_graph_ts(self.date_bounds.start), to_graph_ts(self.date_bounds.end))}
 
         self.logger.info('Dumping Copilot interactions across %d user(s)...' % len(users))
         records = []

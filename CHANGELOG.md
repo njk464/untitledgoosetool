@@ -3,6 +3,31 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+
+## [2.2.0] - CyberFire Goose Lab readiness - 2026-11-02
+### Added
+- Log Analytics: authoritative table discovery via the Tables - List By Workspace API, with automatic fallback to search-based discovery
+  - Tables that exist but return no rows now produce an empty (0-byte) artifact so "queried, nothing returned" is distinguishable from "never queried"
+  - Per-workspace `_collection_status.json` manifest (`schema_version`, `discovery_method` of `tables_api`/`search_fallback`, and per-table `status` of `success`/`failed`/`unavailable`, `row_count`, `artifact`, `error`)
+  - Explicit table queries are limited: a summary search selects tables with rows in the window (manifest `data_check`: `search_summary`/`search_failed`); other listed tables get status `skipped`. `AADGraphActivityLogs` and `MicrosoftGraphActivityLogs` are always queried; if the summary fails, all listed tables are queried
+  - LAW queries are concurrency-limited; rate-limit errors are retried with backoff and persistent failures are recorded as `failed` with the error
+  - `AADGraphActivityLogs` sourcetype (Entra diagnostic category `AzureADGraphActivityLogs`)
+- Hunting: ROADrecon AAD Graph burst and Azure CLI legacy AAD Graph token-acquisition hunts in the web UI catalog
+- `GOOSEY_ENCRYPTION_PW` environment variable for the auth-file encryption password in `goosey conf`, `goosey honk`, `goosey auth` and `goosey d4iot`. Precedence: `--encryption_pw`, then the env variable, then an interactive prompt. Empty value is treated as unset; the password is never logged (debug argument dumps are redacted)
+- `docs/CYBERFIRE_QUICKSTART.md` student quickstart; `requirements-dev.txt` and `MANIFEST.in`; `goosey version` command alongside `goosey --version`
+
+### Changed
+- Incremental runs re-check a lookback window before the saved checkpoint (default 30 minutes; `[variables] incremental_lookback_minutes`) to catch late-arriving records, de-duplicating by id (Entra) or exact-row multiset (LAW, so genuine source duplicates are preserved). The LAW manifest gains `lookback_minutes` and per-table `duplicates_skipped`; `row_count` is rows newly written this run
+- A blank `date_end` now means the current UTC time at execution. An explicit `date_end` remains an exclusive UTC-midnight bound, and checkpoints never exceed the resolved end
+- eDiscovery export download (`ediscovery_export_download`) now defaults to False in generated configs (opt-in)
+- Version unified: `goosey/__init__.py` is the single source of truth and `setup.py` reads it (previously 2.0.1 vs 2.0.4)
+
+### Fixed
+- HQL: `summarize` and nested-field handling fixes
+- Hunting: sign-in hunt target-file glob fix
+
+
+## [2.2.0, earlier work] - eDiscovery, web UI, hunting catalog (previously Unreleased)
 ### Added
 - eDiscovery: New `EdiscoveryDataDumper` (`[ediscovery]` section, `--ediscovery` flag) collecting Microsoft Purview eDiscovery via the Graph v1.0 API
   - Snapshot (read-only): cases, case settings, custodians, noncustodial data sources, searches, legal holds, review sets, review set queries, tags, and operations
