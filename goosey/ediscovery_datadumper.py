@@ -42,7 +42,7 @@ import os
 from datetime import datetime
 from goosey.datadumper import DataDumper
 from goosey.utils import *
-from goosey.utils import resolve_date_bounds, to_graph_ts
+from goosey.utils import PaginationIncomplete, resolve_date_bounds, to_graph_ts
 
 # Base path for the eDiscovery API under the Graph v1.0 endpoint.
 EDISCOVERY_CASES_PATH = "security/cases/ediscoveryCases"
@@ -150,11 +150,16 @@ class EdiscoveryDataDumper(DataDumper):
         pages use the @odata.nextLink URL which already carries the encoded query.
         """
         entries = []
+        first = True
         while url:
             result = await self._get_json(url, params=params)
             params = None
             if result is None:
+                if not first:
+                    # A later page failed: do not return the partial list as if complete (DEC-PAGINATION-001).
+                    raise PaginationIncomplete(f'eDiscovery collection truncated after {len(entries)} entries at {url}', url=url)
                 break
+            first = False
             if 'value' not in result:
                 if 'error' in result:
                     self.logger.debug('eDiscovery error on %s: %s' % (url, result['error'].get('message', result['error'])))

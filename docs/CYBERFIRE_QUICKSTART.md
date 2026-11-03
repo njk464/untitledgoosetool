@@ -4,16 +4,23 @@ Collect Entra ID sign-in and audit logs plus Azure Log Analytics (LAW) tables, t
 
 ## 1. Install
 
-Supported Python: 3.9 through 3.13 (3.12+ recommended for better log output).
+A free-threaded Python 3.14 build (`python3.14t`) and `git` are required (pip fetches the pinned Hql engine from GitHub, so network access to github.com is needed). A regular (GIL) Python 3.14, or any older Python, will not work: `pip install .` stops with an explanatory error.
 
 ```sh
 git clone https://github.com/cisagov/untitledgoosetool.git
 cd untitledgoosetool
-python3 -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
-pip install .
-goosey --version
+# Option A: uv (any OS; recommended)
+uv python install 3.14t
+uv venv --seed -p 3.14t .venv     # --seed installs pip into the venv
+# Option B: python.org 3.14 installer: tick "Download free-threaded binaries" (Windows)
+#           or choose the free-threaded package (macOS); executable is python3.14t / python3.14t.exe
+python3.14t -m venv .venv          # Windows: py -3.14t -m venv .venv
+source .venv/bin/activate      # Windows: .venv\Scripts\activate
+pip install .                  # fetches the pinned Hql engine from GitHub
+goosey --version               # Untitled Goose Tool Version 3.0.0
 ```
+
+Verify the build with `python -c "import sys; print(sys._is_gil_enabled())"`; it must print `False`.
 
 ## 2. Credentials and encryption password
 
@@ -130,7 +137,7 @@ Goosey checkpoints progress in save-state files so reruns are incremental. To go
 
 Deleting state and rerunning **appends** to existing artifacts, so they may then contain duplicate records. For a clean wider recollection, use a fresh output directory (`goosey honk --output_dir output_wide`) instead.
 
-## 7. Web UI and hunting
+## 7. Web UI
 
 ```sh
 goosey web                      # http://127.0.0.1:8000
@@ -138,5 +145,3 @@ goosey web --host 0.0.0.0 --port 8000   # inside a dev container
 ```
 
 In a dev container or Codespace, forward port 8000 (VS Code Ports tab, "Forward a Port") and open the forwarded URL. Binding `0.0.0.0` exposes the UI to your network; only do that inside the container.
-
-Browse Data has a hunting-query catalog, including two hunts for this lab: **ROADrecon AAD Graph burst** and **Azure CLI legacy AAD Graph token acquisition**.

@@ -40,7 +40,8 @@ from datetime import datetime, timedelta
 from goosey.datadumper import DataDumper
 from goosey.progress import get_progress_manager
 from goosey.utils import *
-from goosey.utils import (IdDedupe, floor_to_day, get_incremental_lookback, iter_day_chunks,
+from goosey.utils import (IdDedupe, PaginationIncomplete, collect_time_chunk, floor_to_day, get_incremental_lookback,
+                          get_nextlink, iter_day_chunks,
                           resolve_date_bounds, resume_point, to_graph_ts)
 
 class EntraIdDataDumper(DataDumper):
@@ -141,7 +142,11 @@ class EntraIdDataDumper(DataDumper):
             start_dt = max(checkpoint_dt - self.lookback, lower)
             if resume_url:
                 outfile = os.path.join(signin_directory, source + '_signin_log_' + str(checkpoint_dt.date()) + '.json')
-                await get_nextlink(resume_url, outfile, self.ahsession, self.logger, self.app_auth)
+                try:
+                    await get_nextlink(resume_url, outfile, self.ahsession, self.logger, self.app_auth)
+                except PaginationIncomplete as e:
+                    # A saved nextLink is stale; the checkpoint re-query below covers the same rows.
+                    self.logger.warning(f'Saved nextLink could not be followed ({e}); re-querying from the checkpoint.')
 
         elif self.date_range:
             self.logger.debug(f'Specified date range found. Pulling signin logs for source {source} '
@@ -161,75 +166,39 @@ class EntraIdDataDumper(DataDumper):
             task_name = f"entraid_signins_{source}"
             pbar = pm.create_time_bar(task_name, total_days, desc=f"{'entraid_signins_' + source:<35}")
 
+        failure = None
         for chunk_start, chunk_end, covered_through, _full in iter_day_chunks(start_dt, end_dt):
             self.ensure_token()
             start = to_graph_ts(chunk_start)
             end_time = to_graph_ts(chunk_end)
             outfile = os.path.join(signin_directory, source + '_signin_log_' + str(chunk_start.date()) + '.json')
-            filters = '(createdDateTime ge %s and createdDateTime lt %s)' % (start, end_time)
-            params = {
-                'api-version': 'beta',
-                '$orderby': 'createdDateTime',
-                '$filter': filters,
-                'source': source
-            }
-            url = self.graph_url + "/beta/auditLogs/signIns"
-            retries = 5
-            chunk_ok = False
             # Overlap re-fetch (before the checkpoint): skip ids already in this day's file
             dedupe = IdDedupe(outfile if checkpoint_dt and chunk_start < checkpoint_dt else None)
-            for counter in range (retries):
-                try:
-                    header = {'Authorization': '%s %s' % (self.app_auth['token_type'], self.app_auth['access_token'])}
-                    async with self.ahsession.get(url, headers=header, params=params, raise_for_status=True, timeout=600) as r:
-                        result = await r.json()
-                        nexturl = None
-                        if '@odata.nextLink' in result:
-                            nexturl = result['@odata.nextLink']
-                        if 'value' in result:
-                            with open(outfile, 'a+', encoding='utf-8') as f:
-                                for x in dedupe.filter(result['value']):
-                                    f.write(json.dumps(x))
-                                    f.write("\n")
-                                f.flush()
-                                os.fsync(f)
-                        if 'error' in result:
-                            if result['error']['code'] == 'InvalidAuthenticationToken':
-                                self.logger.error("Error with authentication token: " + result['error']['message'])
-                                self.logger.error("Please re-auth.")
-                                return
-
-                        await get_nextlink(nexturl, outfile, self.ahsession, self.logger, self.app_auth, dedupe=dedupe)
-                        # Never move the checkpoint backwards while re-reading the overlap
-                        if checkpoint_dt is None or covered_through > checkpoint_dt:
-                            self._write_state(statefile, covered_through)
-                    chunk_ok = True
-                    break
-
-                except Exception as e:
-                    try:
-                        if e.status:
-                            if e.status == 429:
-                                self.logger.info('Sleeping for 60 seconds because of API throttle limit was exceeded.')
-                                await asyncio.sleep(RATE_LIMIT_SLEEP_SECONDS)
-                                retries -= 1
-                                self.logger.debug('Retries remaining: {}'.format(str(retries)))
-                            elif e.status == 401:
-                                self.logger.error('401 unauthorized message received. Skipping signin source %s.' % source)
-                                return
-                    except AttributeError as a:
-                        self.logger.error('Error on nextLink retrieval: {}'.format(str(e)))
-
+            try:
+                # Pages the whole window; resumes from the last timestamp written if paging breaks
+                # (e.g. 410 Gone on an expired nextLink) -- see DEC-PAGINATION-001.
+                await collect_time_chunk(
+                    self.ahsession, self.logger, self.app_auth, self.graph_url + "/beta/auditLogs/signIns",
+                    outfile, 'createdDateTime', start, end_time, dedupe,
+                    extra_params={'source': source}, refresh_token=self.ensure_token,
+                    label=f'Signin source {source}')
+            except PaginationIncomplete as e:
+                failure = e
             if os.path.isfile(outfile) and os.stat(outfile).st_size == 0:
                 os.remove(outfile)
-            if not chunk_ok:
+            if failure:
                 # Never skip a failed chunk: a later checkpoint would claim coverage over the gap.
-                self.logger.error(f'Signin source {source}: failed to collect {start} to {end_time}; '
+                self.logger.error(f'Signin source {source}: failed to collect {start} to {end_time}: {failure}; '
                                   'stopping so the checkpoint stays before the gap.')
                 break
+            # Never move the checkpoint backwards while re-reading the overlap
+            if checkpoint_dt is None or covered_through > checkpoint_dt:
+                self._write_state(statefile, covered_through)
             if pbar:
                 pbar.update(1)
 
+        if failure:
+            raise failure  # func_wrapper reports this task as FAILED (not "Success")
         self.logger.info('Finished dumping signin logs for source: {}'.format(source))
 
     @requires_auth
@@ -258,7 +227,11 @@ class EntraIdDataDumper(DataDumper):
             start_dt = max(checkpoint_dt - self.lookback, lower)
             if resume_url:
                 outfile = os.path.join(sub_dir, 'entraidauditlog_' + str(checkpoint_dt.date()) + '.json')
-                await get_nextlink(resume_url, outfile, self.ahsession, self.logger, self.app_auth)
+                try:
+                    await get_nextlink(resume_url, outfile, self.ahsession, self.logger, self.app_auth)
+                except PaginationIncomplete as e:
+                    # A saved nextLink is stale; the checkpoint re-query below covers the same rows.
+                    self.logger.warning(f'Saved nextLink could not be followed ({e}); re-querying from the checkpoint.')
 
         elif self.date_range:
             start_dt = self.date_bounds.start
@@ -281,83 +254,35 @@ class EntraIdDataDumper(DataDumper):
         if pm and total_days > 0:
             pbar = pm.create_time_bar("entraid_audit", total_days, desc=f"{'entraid_audit':<35}")
 
+        failure = None
         for chunk_start, chunk_end, covered_through, _full in iter_day_chunks(start_dt, end_dt):
             self.ensure_token()
-            retries = 5
             start = to_graph_ts(chunk_start)
             end_time = to_graph_ts(chunk_end)
             outfile = os.path.join(sub_dir, 'entraidauditlog_' + str(chunk_start.date()) + '.json')
-            filters = '(activityDateTime ge %s and activityDateTime lt %s)' % (start, end_time)
             # Overlap re-fetch (before the checkpoint): skip ids already in this day's file
             dedupe = IdDedupe(outfile if checkpoint_dt and chunk_start < checkpoint_dt else None)
 
-            params = {
-                'api-version': 'beta',
-                '$orderby': 'activityDateTime',
-                '$filter': filters,
-            }
-
             self.logger.debug(f'Dumping Entra ID audit logs for time frame {start} to {end_time}')
-
-            success = False
-            for counter in range (retries):
-                try:
-                    header = {'Authorization': '%s %s' % (self.app_auth['token_type'], self.app_auth['access_token'])}
-                    async with self.ahsession.get(url, headers=header, params=params, raise_for_status=True, timeout=600) as r:
-                        result = await r.json()
-                        nexturl = None
-                        if '@odata.nextLink' in result:
-                            nexturl = result['@odata.nextLink']
-                        if 'value' in result:
-                            # Append (never truncate): a resumed partial day extends the same file.
-                            if result['value'] != []:
-                                fresh = dedupe.filter(result['value'])
-                                if fresh:
-                                    with open(outfile, 'a', encoding='utf-8') as f:
-                                        f.write("\n".join([json.dumps(x) for x in fresh]) + '\n')
-                            if nexturl:
-                                await get_nextlink(nexturl, outfile, self.ahsession, self.logger, self.app_auth,
-                                                   dedupe=dedupe)
-                            # We need to end the retry loop if we successfully dumped the audit log data
-                            success = True
-                        if 'error' in result:
-                            if result['error']['code'] == 'InvalidAuthenticationToken':
-                                self.logger.error("Error with authentication token: " + result['error']['message'])
-                                self.logger.error("Please re-auth.")
-                                return
-                            else:
-                                self.logger.debug('Error in result: {}'.format(result['error']))
-                                self.logger.info('Sleeping for 60 seconds because of API throttle limit was exceeded.')
-                                await asyncio.sleep(RATE_LIMIT_SLEEP_SECONDS)
-                                retries -=1
-
-                        if success:
-                            # Checkpoint only what was actually covered (clipped to `now` for the final chunk).
-                            if checkpoint_dt is None or covered_through > checkpoint_dt:
-                                self._write_state(statefile, covered_through)
-                            if pbar:
-                                pbar.update(1)
-                            break
-
-
-                except Exception as e:
-                    try:
-                        if e.status:
-                            if e.status == 429:
-                                self.logger.info('Sleeping for 60 seconds because of API throttle limit was exceeded.')
-                                await asyncio.sleep(RATE_LIMIT_SLEEP_SECONDS)
-                                retries -= 1
-                            elif e.status == 401:
-                                self.logger.error('401 unauthorized message received. Skipping audit logs.')
-                                return
-                    except AttributeError as a:
-                        self.logger.error('Error on nextLink retrieval: {}'.format(str(e)))
-
-            if not success:
-                self.logger.error(f'Entra audit: failed to collect {start} to {end_time}; '
+            try:
+                # Appends (never truncates) and resumes from the last timestamp on broken paging.
+                await collect_time_chunk(
+                    self.ahsession, self.logger, self.app_auth, url, outfile, 'activityDateTime',
+                    start, end_time, dedupe, refresh_token=self.ensure_token, label='Entra audit')
+            except PaginationIncomplete as e:
+                failure = e
+            if failure:
+                self.logger.error(f'Entra audit: failed to collect {start} to {end_time}: {failure}; '
                                   'stopping so the checkpoint stays before the gap.')
                 break
+            # Checkpoint only what was actually covered (clipped to `now` for the final chunk).
+            if checkpoint_dt is None or covered_through > checkpoint_dt:
+                self._write_state(statefile, covered_through)
+            if pbar:
+                pbar.update(1)
 
+        if failure:
+            raise failure  # func_wrapper reports this task as FAILED (not "Success")
         self.logger.info('Finished dumping Entra ID audit logs.')
     dump_entraid_audit._manages_own_progress = True
 
@@ -470,8 +395,9 @@ class EntraIdDataDumper(DataDumper):
                 except Exception as e:
                     self.logger.error('Error on nextLink retrieval {}: {}'.format(skiptoken, str(e)))
                     if retries == 0:
-                        self.logger.info('Error. No more retries on {}.'.format(skiptoken))
-                        nexturl = None
+                        self.logger.error('Error. No more retries on {}.'.format(skiptoken))
+                        # Writing a partial parent list would silently drop children (DEC-PAGINATION-001).
+                        raise PaginationIncomplete(f'{parent} listing incomplete: {e!r}', url=nexturl, cause=e) from e
                     else:
                         self.logger.info('Error. Retrying {} up to {} more times'.format(skiptoken, retries))
                         retries -= 1
@@ -479,6 +405,7 @@ class EntraIdDataDumper(DataDumper):
 
         self.logger.info('Dumping %s %s information...' % (parent, child))
         child_list = []
+        incomplete = []  # parents whose child pages could not be fully read
         for parent_id in parent_list:
             url2 = url_parent + parent + "/" + parent_id + '/%s' % (child)
             if child == 'appRoleAssignedResources':
@@ -533,7 +460,8 @@ class EntraIdDataDumper(DataDumper):
                         except Exception as e:
                             self.logger.error('Error on nextLink retrieval {}: {}'.format(skiptoken, str(e)))
                             if retries == 0:
-                                self.logger.info('Error. No more retries on {}.'.format(skiptoken))
+                                self.logger.error('Error. No more retries on {}.'.format(skiptoken))
+                                incomplete.append(f'{parent}/{parent_id}/{child}')
                                 nexturl = None
                             else:
                                 self.logger.info('Error. Retrying {} up to {} more times'.format(skiptoken, retries))
@@ -559,6 +487,10 @@ class EntraIdDataDumper(DataDumper):
             with open(self.failurefile, 'a+', encoding='utf-8') as f:
                 f.write('No output file: ' + parent + "_" + child + ' - ' + str((datetime.now())) + '\n')
 
+        if incomplete:
+            # Partial data is kept on disk, but the task must not report Success (DEC-PAGINATION-001).
+            raise PaginationIncomplete(f'{parent} {child}: child pagination incomplete for '
+                                       f'{len(incomplete)} parent(s), e.g. {incomplete[0]}')
         self.logger.info('Finished dumping %s %s information.' % (parent, child))
 
     async def dump_configs(self) -> None:

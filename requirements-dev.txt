@@ -1,3 +1,4 @@
-pytest>=8.0,<9
+pytest>=8.0,<10
 ruff>=0.6
 build>=1.2
+setuptools==84.2.1  # tests run `python setup.py --version`; not preinstalled in `uv venv --seed` venvs

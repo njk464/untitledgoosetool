@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 from goosey.datadumper import DataDumper
 from goosey.progress import get_progress_manager
 from goosey.utils import *
-from goosey.utils import resolve_date_bounds, to_graph_ts
+from goosey.utils import PaginationIncomplete, resolve_date_bounds, to_graph_ts
 from io import StringIO
 
 class M365DataDumper(DataDumper):
@@ -1350,6 +1350,7 @@ class M365DataDumper(DataDumper):
                 bar.bar_format = "{desc} |{bar}| {percentage:3.0f}% | day {n_fmt}/{total_fmt} | elapsed {elapsed} | {postfix}"
 
         total_records = 0
+        gap = None  # first day that was skipped or truncated; blocks checkpoint advance
         ual_start_time = time.perf_counter()
         current = start
 
@@ -1361,6 +1362,7 @@ class M365DataDumper(DataDumper):
                 try:
                     query_id = await self._graph_ual_create_query(current, day_end, filters)
                     if not query_id:
+                        gap = gap or f'{current.date()}: audit query could not be created'
                         current = day_end
                         if bar:
                             bar.update(1)
@@ -1369,6 +1371,7 @@ class M365DataDumper(DataDumper):
                     succeeded = await self._graph_ual_poll_query(query_id)
                     if not succeeded:
                         self.logger.warning(f"Graph UAL query failed for {current.date()}, skipping")
+                        gap = gap or f'{current.date()}: audit query failed or timed out'
                         current = day_end
                         if bar:
                             bar.update(1)
@@ -1377,7 +1380,9 @@ class M365DataDumper(DataDumper):
                     day_records = await self._graph_ual_fetch_records(query_id, current)
                     total_records += day_records
 
-                    save_state(statefile, day_end)
+                    if gap is None:
+                        # Never advance the checkpoint past a day that was skipped or truncated.
+                        save_state(statefile, day_end)
 
                     elapsed = time.perf_counter() - ual_start_time
                     rate = int(total_records / elapsed * 3600) if elapsed > 0 else 0
@@ -1388,6 +1393,7 @@ class M365DataDumper(DataDumper):
                 except Exception as e:
                     self.logger.error(f"Graph UAL error for {current.date()}: {e}")
                     self.logger.debug("Graph UAL error details", exc_info=True)
+                    gap = gap or f'{current.date()}: {e}'
 
                 current = day_end
         finally:
@@ -1398,6 +1404,9 @@ class M365DataDumper(DataDumper):
             if pm:
                 pm.complete_task(bar_name)
 
+        if gap:
+            # DEC-PAGINATION-001: report FAILED; the checkpoint stayed before the first gap.
+            raise PaginationIncomplete(f'Graph UAL collection incomplete (first gap {gap}); checkpoint not advanced past it')
         self.logger.info(f"Finished Graph UAL collection. Total records: {total_records}")
 
     dump_ual_graph._manages_own_progress = True
@@ -1469,7 +1478,8 @@ class M365DataDumper(DataDumper):
                 if r.status != 200:
                     err_text = await r.text()
                     self.logger.error(f"Graph UAL fetch error ({r.status}): {err_text}")
-                    break
+                    raise PaginationIncomplete(f'Graph UAL records fetch failed with HTTP {r.status} for {day_start.date()}',
+                                               url=url, status=r.status, outfile=outfile)
                 result = await r.json()
                 if 'value' in result:
                     with open(outfile, 'a', encoding='utf-8') as f:

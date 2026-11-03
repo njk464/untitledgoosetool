@@ -9,16 +9,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Installation and Setup
 
 ```sh
-# Create and activate a virtual environment (recommended)
-python3 -m venv .venv
-source .venv/bin/activate  # Linux/Mac
-# .venv\Scripts\activate   # Windows
-
-# Install the package
-pip install .
+# Option A: uv (any OS; recommended)
+uv python install 3.14t
+uv venv --seed -p 3.14t .venv     # --seed installs pip into the venv
+# Option B: python.org 3.14 installer: tick "Download free-threaded binaries" (Windows)
+#           or choose the free-threaded package (macOS); executable is python3.14t / python3.14t.exe
+python3.14t -m venv .venv          # Windows: py -3.14t -m venv .venv
+source .venv/bin/activate      # Windows: .venv\Scripts\activate
+pip install .                  # fetches the pinned Hql engine from GitHub
+goosey --version               # Untitled Goose Tool Version 3.0.0
 ```
 
-Requires Python 3.9–3.13 (enforced by setup.py). Python 3.12+ is recommended for better logging (taskName in log format).
+Requires free-threaded Python 3.14 (python3.14t); enforced by setup.py (a GIL Python 3.14 or older stops `pip install .` with an explanatory error). Needs network access to github.com for the pinned Hql engine. uv venvs lack pip by default: use `uv venv --seed` or `uv pip install .`.
 
 ## CLI Commands
 

@@ -2,7 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [3.0.0] - 2026-11-02
+**Breaking:** Python 3.14 free-threaded (`python3.14t`) is now required.
+
+### Changed
+- **Python 3.14 free-threaded (`python3.14t`) is now required** (was 3.9-3.13). `setup.py` fails the install with a clear message on older Pythons and on GIL-enabled 3.14 builds, because the HQL engine's polars runtime wheels exist only for the `cp314t` ABI
+- HQL engine is now upstream [Hashfastr/Hql](https://github.com/Hashfastr/Hql) `main`, pinned to an exact commit in `requirements.txt` (replaces PyPI `pyhql==0.0.9`). Installing needs `git` on `PATH`
+- All dependencies re-pinned from a real 3.14t resolution (direct dependencies only; the old full freeze with unused packages such as `zstandard` was dropped). `azure-mgmt-monitor` is held at 6.0.2 (7.x removed `diagnostic_settings`)
+- `setup.py` parses `requirements.txt` line by line, so `pkg @ url` requirement lines work
+
+### Fixed
+- **Silent data loss in paginated collection:** a `410 Gone` (expired skiptoken) or exhausted retries on an `@odata.nextLink` made `get_nextlink` stop quietly, so the sign-in collector reported success and advanced its checkpoint past the missing rows. `get_nextlink` now raises `PaginationIncomplete`; Entra sign-in and audit windows resume from the last timestamp written (de-duplicated, up to 5 attempts) and otherwise leave the checkpoint before the gap and report the task as FAILED. Also hardened: Entra provisioning/config/relationship collectors, D4IoT portal, MDE paged endpoints, eDiscovery collections and Graph UAL (a skipped/truncated day no longer lets the checkpoint advance past it)
+- Azure: `SubscriptionClient` import for current Azure SDKs (`azure-mgmt-resource-subscriptions`); `goosey honk`/`goosey setup` no longer fail at import
+- HQL queries containing `": "` (for example `where Col == "Foo: bar"`) were misrouted to the Sigma parser and failed with "Invalid sigma supplied to parser" (fixed in upstream Hql; regression-tested)
+- HQL: files below subdirectories of the output folder now resolve under Hql main (patched in `goosey/hql_compat.py`) and reads are confined to the output directory
+
+### Removed
+- Obsolete `goosey/hql_compat.py` patches now fixed upstream: the `from __future__ import annotations` import hook for Python < 3.14, the resilient Table init and schema fallbacks, the MvExpand fix and the NDJSON seek fix. Retained: JSON file resolution, single-object files and dotted-name columns, `dcount()`, numeric/string tolerant `==`/`!=`, each guarded by a sentinel test that fails once upstream fixes the gap
+- Hunting queries feature removed entirely: web UI Hunting Queries panel, /api/hunting/* endpoints, goosey/data/hunting_queries.json, scripts/validate_hunting_queries.py, and the KQL-to-HQL translation guide
 
 ## [2.2.0] - CyberFire Goose Lab readiness - 2026-11-02
 ### Added
@@ -12,7 +29,6 @@ All notable changes to this project will be documented in this file.
   - Explicit table queries are limited: a summary search selects tables with rows in the window (manifest `data_check`: `search_summary`/`search_failed`); other listed tables get status `skipped`. `AADGraphActivityLogs` and `MicrosoftGraphActivityLogs` are always queried; if the summary fails, all listed tables are queried
   - LAW queries are concurrency-limited; rate-limit errors are retried with backoff and persistent failures are recorded as `failed` with the error
   - `AADGraphActivityLogs` sourcetype (Entra diagnostic category `AzureADGraphActivityLogs`)
-- Hunting: ROADrecon AAD Graph burst and Azure CLI legacy AAD Graph token-acquisition hunts in the web UI catalog
 - `GOOSEY_ENCRYPTION_PW` environment variable for the auth-file encryption password in `goosey conf`, `goosey honk`, `goosey auth` and `goosey d4iot`. Precedence: `--encryption_pw`, then the env variable, then an interactive prompt. Empty value is treated as unset; the password is never logged (debug argument dumps are redacted)
 - `docs/CYBERFIRE_QUICKSTART.md` student quickstart; `requirements-dev.txt` and `MANIFEST.in`; `goosey version` command alongside `goosey --version`
 
@@ -24,10 +40,9 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 - HQL: `summarize` and nested-field handling fixes
-- Hunting: sign-in hunt target-file glob fix
 
 
-## [2.2.0, earlier work] - eDiscovery, web UI, hunting catalog (previously Unreleased)
+## [2.2.0, earlier work] - eDiscovery, web UI (previously Unreleased)
 ### Added
 - eDiscovery: New `EdiscoveryDataDumper` (`[ediscovery]` section, `--ediscovery` flag) collecting Microsoft Purview eDiscovery via the Graph v1.0 API
   - Snapshot (read-only): cases, case settings, custodians, noncustodial data sources, searches, legal holds, review sets, review set queries, tags, and operations
@@ -47,9 +62,6 @@ All notable changes to this project will be documented in this file.
 - Web UI: Fix Jinja2 template syntax error in JSDoc comment (index.html line 1580)
 
 ### Added
-- Web UI: Hunting Queries panel in Browse Data left sidebar — collapsible section with 40-query catalog, client-side filtering, and click-to-run integration with HQL editor
-- Web API: Hunting query catalog endpoints (`/api/hunting/queries`, per-category, per-query) with file resolution and path-security validation
-- Hunting: 40 curated HQL hunting queries across 5 categories (sign-in, UAL, config, MDE, Azure) with validation script and KQL-to-HQL translation guide
 - Entra ID: administrative units and cross-tenant access policy endpoints for forensic coverage
 - MDE: 8 new advanced hunting tables (DeviceInfo, DeviceNetworkInfo, Defender XDR tables)
 - Azure: VNet flow logs collection (`dump_vnet_flow_logs`) with NSG flow log deprecation notice

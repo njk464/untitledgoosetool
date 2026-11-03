@@ -20,7 +20,7 @@ import itertools
 from goosey.datadumper import DataDumper
 from goosey.progress import get_progress_manager
 from goosey.utils import *
-from goosey.utils import resolve_date_bounds, to_graph_ts
+from goosey.utils import PaginationIncomplete, resolve_date_bounds, to_graph_ts
 import pytz
 
 utc=pytz.UTC
@@ -1211,6 +1211,10 @@ class MDEDataDumper(DataDumper):
                 self.logger.error(f"Error fetching {url}: {e}")
                 tries += 1
 
+        if url:
+            # Retries exhausted mid-chain: do not return a short count as success (DEC-PAGINATION-001).
+            raise PaginationIncomplete(f'MDE pagination incomplete after {total_count} records at {url}',
+                                       url=url, outfile=outfile)
         return total_count
 
     async def dump_machine_alerts(self) -> None:

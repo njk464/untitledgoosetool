@@ -37,7 +37,8 @@ from azure.identity import ClientSecretCredential
 from azure.mgmt.compute import ComputeManagementClient
 from azure.mgmt.monitor import MonitorManagementClient
 from azure.mgmt.network import NetworkManagementClient
-from azure.mgmt.resource import SubscriptionClient, ResourceManagementClient
+from azure.mgmt.resource.subscriptions import SubscriptionClient
+from azure.mgmt.resource.resources import ResourceManagementClient
 from azure.mgmt.security import SecurityCenter
 from azure.mgmt.storage import StorageManagementClient
 from azure.mgmt.web import WebSiteManagementClient

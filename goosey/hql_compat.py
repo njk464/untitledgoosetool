@@ -4,25 +4,42 @@
 """Goosey HQL Compatibility Layer
 
 Provides a clean interface for running HQL (Hunting Query Language) queries
-against collected Goosey output data.
+against collected Goosey output data, on top of upstream Hql ``main``
+(github.com/Hashfastr/Hql, pinned by commit in requirements.txt; free-threaded
+Python 3.14 only).
 
-This module performs three important tasks at import time:
-1. Monkey-patches a seek(0) bug in pyhql's NDJSON loader so that JSONL/NDJSON
-   files are parsed correctly instead of returning 0 rows.
-2. Suppresses the harmless "Invalid sigma supplied to parser" warning that
-   pyhql emits on every import.
-3. Caches the HQL Config object so it is built once per output directory.
+Upstream ``main`` fixed most of what the old pyhql 0.0.9 layer worked around
+(NDJSON seek, summarize/count, Table init on overflowing ints and mixed types,
+mv-expand, the ``from __future__`` import-time crash, the Sigma misroute of
+queries containing ": ").  What remains are five small gaps that goosey data
+still hits; each has a sentinel test in tests/test_hql_compat.py that runs the
+UNPATCHED engine and fails once upstream fixes the gap, telling us to delete
+the patch.
+
+Retained patches (applied at import time):
+1. JSON database file resolution (``JSON.eval``): upstream globs a relative path
+   against the *parent* of ``local-base/<path>``, so any file below a
+   subdirectory (every goosey artifact) matches nothing and returns 0 rows.
+   The patch globs ``local-base/<path>`` and refuses paths that resolve outside
+   local-base.
+1b. Multi-file queries are combined into one table (DEC-HQL-017).
+2. JSON loader (``JSON.load_data``): a single-object file (e.g.
+   ``_collection_status.json``, EXO_TransportConfig) becomes one row instead of
+   crashing, and dotted names referenced as ``['a.b']`` are materialised as
+   top-level columns (DEC-HQL-008).
+3. ``dcount()`` aggregate (missing upstream; used by KQL-habit queries).
+4. Numeric/string tolerant ``==`` / ``!=`` (DEC-HQL-009).
+6. String literals are evaluated by value; verbatim doubled quotes (DEC-HQL-018).
+5. Silence the harmless root-logger warning upstream emits for every non-Sigma
+   query ("Invalid sigma supplied to parser").
 
 @decision DEC-HQL-001
-@title Monkey-patch pyhql NDJSON loader to fix seek(0) bug
+@title Patch the JSON loader (single-object files, dotted-name columns)
 @status accepted
-@rationale pyhql's JSON database loader tries json.loads() first, then falls
-  back to ndjson.reader() for NDJSON/JSONL files.  The fallback path never
-  calls f.seek(0) after the failed json.loads(), so ndjson.reader() receives
-  a file object whose position is at EOF and reads zero records.  The fix
-  inserts a seek(0) before the ndjson.reader() call.  We patch the method
-  on the class (not the instance) immediately on import so every subsequent
-  query benefits automatically.
+@rationale Originally a seek(0) fix for NDJSON; upstream main fixed that, so the
+  loader patch now only wraps single JSON objects into a one-row list and
+  materialises referenced dotted names (DEC-HQL-008).  Patched on the class at
+  import so every subsequent query benefits.
 
 @decision DEC-HQL-002
 @title Build HQL Config programmatically, not from YAML files
@@ -41,37 +58,82 @@ This module performs three important tasks at import time:
   construction across multiple queries in a session while still respecting
   changes to the output directory (e.g. the analyst switches to a different
   collection).
+
+@decision DEC-HQL-008
+@title Materialise bracketed dotted names (['status.errorCode']) as columns at load time
+@status accepted
+@rationale Analysts write nested Graph fields as ['status.errorCode'].  Hql
+  treats that bracket form as ONE column name, so against real Graph JSON
+  (where `status` is a struct) it finds no such column.  Hql's own unbracketed
+  path form (status.errorCode) works for projection but wraps results in
+  structs, which breaks comparisons on e.g. booleans.  run_hql_query() extracts
+  the dotted names the query references and the patched loader adds exactly
+  those as extra top-level columns (the struct is left untouched).  A record
+  that already has a literal flat key of that name is left alone.
+
+@decision DEC-HQL-009
+@title Numeric/string tolerant == and != in HQL
+@status accepted
+@rationale Graph JSON carries status.errorCode as an integer while analysts
+  used to KQL's loose typing write == "0".  With stock Hql the string-vs-int
+  comparison silently matches nothing.  A numeric-string literal compares as
+  strings (so int and string columns both work); an integer literal compares
+  as Float64 (so int, float and numeric-string columns work).  Everything else
+  keeps stock behaviour.
+
+@decision DEC-HQL-015
+@title Drop the 0.0.9-era patches when moving to Hql main on Python 3.14t
+@status accepted
+@rationale The `__future__` annotations import hook, the resilient Table init
+  and schema-from-df fallbacks, the MvExpand fix, the NDJSON seek fix and the
+  old Equality/dcount shapes were verified unnecessary (or obsolete in API) on
+  Hql main.  Retained patches are guarded by sentinel tests (see module doc).
+
+@decision DEC-HQL-017
+@title Combine multi-file queries into ONE table (diagonal concat)
+@status accepted
+@rationale `.file("A", "B")` / wildcards load one Hql table per file.  Hql then runs each
+  operator per table, so `summarize ... by Col` raises "Failed to unnest value" for every
+  file lacking Col, and run_hql_query only ever showed the first table (rows of the other
+  files vanished).  Concatenating the loaded rows into a single table (absent keys read as
+  null) makes mixed-schema queries behave like one KQL table.  Found by the live sourcetype
+  sweep: AlertEvidence + AlertInfo.
+
+@decision DEC-HQL-018
+@title Evaluate string literals by value; honour verbatim doubled quotes
+@status accepted
+@rationale Hql main parses "a\\\\b" / "tab\\there" correctly (Python escape rules) but
+  StringLiteral.str() hands the evaluator a unicode_escape'd copy, so any literal containing a
+  backslash or control character compared against the escaped text and matched nothing (==,
+  contains, has, startswith, in, ... all go through it).  str() now returns the real value.
+  KQL verbatim literals escape the quote by doubling it (at-sign, quote, say, two quotes, hi, ...); the parser only
+  handled backslash-quote, so the parse result is corrected after the fact.
+
+@decision DEC-HQL-016
+@title Serialise queries and keep per-query state in a module global, not thread-local
+@status accepted
+@rationale On free-threaded Python Hql evaluates instructions in worker threads
+  (Hql.Threading.InstructionPool), so a threading.local set by the caller
+  thread is invisible to the loader.  run_hql_query() holds a lock for the whole
+  query and publishes the dotted-name set in a module global.  Polars still
+  parallelises inside a query; only concurrent *queries* are serialised.
 """
 
-import __future__
+import glob
 import importlib
-import importlib.machinery
 import json
 import logging
 import math
 import os
 import re
-import sys
 import threading
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Per-query state: dotted field paths referenced as ['a.b'] in the query text
+# Per-query state (DEC-HQL-016)
 # ---------------------------------------------------------------------------
-# @decision DEC-HQL-008
-# @title Materialise bracketed dotted names (['status.errorCode']) as columns at load time
-# @status accepted
-# @rationale The hunting catalog (and analysts) write nested Graph fields as
-#   ['status.errorCode'].  pyhql treats that bracket form as ONE column name,
-#   so against real Graph JSON (where `status` is a struct) it finds no such
-#   column and silently returns zero rows.  pyhql's own unbracketed path form
-#   (status.errorCode) works for projection but its path_to_expr wraps results
-#   in structs, which breaks comparisons on e.g. booleans.  Rather than patch
-#   pyhql's expression compiler, run_hql_query() extracts the dotted names the
-#   query actually references and the patched JSON loader adds exactly those
-#   as extra top-level columns (the original struct is left untouched).  Only
-#   referenced paths are materialised, so large files are not bloated.  A
-#   record that already has a literal flat key of that name is left alone.
-_query_state = threading.local()
+_query_lock = threading.RLock()
+_active_dotted = None  # set of dotted names for the query currently running
 
 _BRACKET_DOTTED_RE = re.compile(r"""\[\s*(['"])([^'"\]]+?)\1\s*\]""")
 
@@ -107,359 +169,170 @@ def _materialise_dotted(rows, paths):
                 row[name] = cur
     return rows
 
-# ---------------------------------------------------------------------------
-# Import hook: make PyPI pyhql 0.0.9 importable on Python 3.9 - 3.13
-# ---------------------------------------------------------------------------
-# @decision DEC-HQL-013
-# @title Compile Hql.* with `from __future__ import annotations` via a meta_path finder
-# @status accepted
-# @rationale pyhql 0.0.9 (latest on PyPI) has forward references in annotations
-#   evaluated at class-body time (e.g. Hql/Data/Schema.py `def join(...) ->
-#   Schema:`), so `import Hql` raises NameError before Python 3.14 (PEP 649).
-#   Editing site-packages is not an option for a pip-installed tool, so we
-#   install a finder that serves Hql / Hql.* from the normal source files but
-#   compiles them with the `annotations` future flag.  get_code() deliberately
-#   bypasses the .pyc cache: pip pre-compiles unflagged bytecode that would
-#   otherwise be loaded and fail at exec time.  The flag is harmless on 3.14.
-#   This must run before anything imports Hql, so every Hql consumer imports
-#   goosey.hql_compat first.
-
-class _AnnotationsFutureLoader(importlib.machinery.SourceFileLoader):
-    """SourceFileLoader that compiles with postponed annotation evaluation."""
-
-    def source_to_code(self, data, path, *, _optimize=-1):
-        return compile(data, path, 'exec',
-                       flags=__future__.annotations.compiler_flag,
-                       dont_inherit=True, optimize=_optimize)
-
-    def get_code(self, fullname):
-        # No bytecode cache: see DEC-HQL-013.
-        path = self.get_filename(fullname)
-        return self.source_to_code(self.get_data(path), path)
-
-
-class _HqlFutureAnnotationsFinder:
-    """meta_path finder that swaps in _AnnotationsFutureLoader for Hql.*."""
-
-    @classmethod
-    def find_spec(cls, fullname, path=None, target=None):
-        if fullname != 'Hql' and not fullname.startswith('Hql.'):
-            return None
-        spec = importlib.machinery.PathFinder.find_spec(fullname, path, target)
-        if spec is not None and type(spec.loader) is importlib.machinery.SourceFileLoader:
-            spec.loader = _AnnotationsFutureLoader(spec.loader.name, spec.loader.path)
-        return spec
-
-
-def install_hql_import_hook():
-    """Install the Hql import hook once (idempotent)."""
-    if not any(f is _HqlFutureAnnotationsFinder for f in sys.meta_path):
-        sys.meta_path.insert(0, _HqlFutureAnnotationsFinder)
-
-
-install_hql_import_hook()
 
 # ---------------------------------------------------------------------------
-# Silence the harmless sigma parser warning emitted by pyhql on import
+# Silence the harmless Sigma-attempt warning (patch 5)
 # ---------------------------------------------------------------------------
-logging.getLogger('Hql').setLevel(logging.ERROR)
-logging.getLogger('sigma').setLevel(logging.ERROR)
+class _DropSigmaNoise(logging.Filter):
+    """Drop upstream's "Invalid sigma supplied to parser" warning (root logger)."""
+
+    def filter(self, record):
+        return 'Invalid sigma supplied' not in record.getMessage()
+
+
+logging.getLogger().addFilter(_DropSigmaNoise())
 
 # ---------------------------------------------------------------------------
-# Monkey-patch: fix the NDJSON seek(0) bug in pyhql's JSON database loader
+# Patches against Hql main (see module docstring for the rationale of each)
 # ---------------------------------------------------------------------------
 try:
-    import ndjson as _ndjson_mod
-    _json_db_mod = importlib.import_module('Hql.Operators.Database.JSON')
+    import polars as pl
+    _json_db_mod = importlib.import_module('Hql.Database.JSON')
+    _hqle = importlib.import_module('Hql.Exceptions').HqlExceptions
+    _data_mod = importlib.import_module('Hql.Data')
+    _Table, _Data = _data_mod.Table, _data_mod.Data
+    _ctx_mod = importlib.import_module('Hql.Context')
+    _count_mod = importlib.import_module('Hql.Functions.count')
+    _Function = importlib.import_module('Hql.Functions').Function
+    _hqlt = importlib.import_module('Hql.Types.Hql').HqlTypes
+    _Equality = importlib.import_module('Hql.Expressions.Logic').Equality
+    _lit_mod = importlib.import_module('Hql.Expressions.Literals')
+    _BaseExpressions = importlib.import_module('Hql.Parser.BaseExpressions').BaseExpressions
+except ImportError:  # pyhql not installed; the error surfaces at query time
+    _json_db_mod = None
+
+if _json_db_mod is not None:
+    _JSON = _json_db_mod.JSON
+    _orig_eval = _JSON.eval
 
     def _patched_load_data(self, f, name):
-        """Load data from a JSON or NDJSON/JSONL file.
-
-        Tries standard JSON first; on failure, seeks back to the start of
-        the file and reads as NDJSON (the seek(0) is the bug fix — pyhql
-        omits it in the fallback path, causing empty results for JSONL files).
-        """
+        """Load JSON/NDJSON; wrap single objects; materialise dotted names (patch 2)."""
+        import ndjson
         try:
             data = json.loads(f.read())
         except Exception:
             try:
-                f.seek(0)  # THE FIX: reset file position before NDJSON read
-                data = [x for x in _ndjson_mod.reader(f)]
+                f.seek(0)
+                data = [x for x in ndjson.reader(f)]
             except Exception:
                 f.close()
-                from Hql.Exceptions import HqlExceptions as hqle
-                raise hqle.QueryException('Could not load data from file')
+                raise _hqle.QueryException('JSON database not given valid json data')
         f.close()
-        # Wrap single-object JSON files (e.g. EXO_TransportConfig) into a list
-        # so pyhql's Schema/Table can iterate over rows, not dict keys.
         if isinstance(data, dict):
             data = [data]
         limit = self.get_limit(name)
         if limit is not None:
             data = data[:limit]
-        return _materialise_dotted(data, getattr(_query_state, 'dotted', None))
+        return _materialise_dotted(data, _active_dotted)
 
-    _json_db_mod.JSON.load_data = _patched_load_data
+    def _patched_eval(self, ctx):
+        """Resolve file specs against local-base (patch 1), confined to local-base."""
+        if not self.files and not self.urls:
+            return _orig_eval(self, ctx)  # raises upstream's "no file provided"
+        base = os.path.realpath(self.local_base)
+        paths = []
+        for spec in self.files:
+            for match in sorted(glob.glob(os.path.join(base, spec))):
+                real = os.path.realpath(match)
+                if real != base and not real.startswith(base + os.sep):
+                    raise _hqle.QueryException(
+                        f'Refusing to read outside the data directory: {spec}')
+                paths.append(Path(real))
+        loaded = []  # (name, rows) per source file / URL
+        for path in paths:
+            files = [path] if path.is_file() else sorted(x for x in path.iterdir() if x.is_file())
+            for f in files:
+                with open(f) as fh:
+                    loaded.append((f.name, self.load_data(fh, f.name)))
+        for url in self.urls:
+            loaded.append((url, self.load_data(self.from_url(url), url)))
+        # One result table for the whole file set (DEC-HQL-017): rows are concatenated and
+        # missing keys become nulls, so files with different schemas behave like one table.
+        if len(loaded) > 1:
+            rows = [r for _, part in loaded for r in part]
+            tables = [_Table(init_data=rows, name=loaded[0][0])] if rows else []
+        else:
+            tables = [_Table(init_data=part, name=name) for name, part in loaded]
+        ctx.data = _Data(tables=tables)
+        return ctx
 
-    # ------------------------------------------------------------------
-    # Monkey-patch: resilient Table.__init__ for overflow/type errors
-    # ------------------------------------------------------------------
-    # pyhql maps Python int→Polars Int32 and builds a strict schema.
-    # Forensic data often has values exceeding Int32 or even Int64 (EXO
-    # InboxRules identifiers can be >2^63).  Rather than patching every
-    # type individually, we wrap Table.__init__ to catch ComputeError
-    # from pl.from_dicts() and retry WITHOUT a schema, letting Polars
-    # infer types natively (it uses Int64 by default and falls back to
-    # Utf8 for overflow).  The Schema is then rebuilt from the DataFrame.
-    #
-    # @decision DEC-HQL-005
-    # @title Resilient Table init with schemaless fallback
-    # @status accepted
-    # @rationale Forensic exports contain arbitrary integer sizes and
-    #   heterogeneous types that defeat any fixed schema mapping.  A
-    #   try/fallback approach handles all cases without needing to
-    #   anticipate every data anomaly.
-    import polars as pl
-    _data_mod = importlib.import_module('Hql.Data')
-    _Table = _data_mod.Table
-    _orig_table_init = _Table.__init__
-
-    def _safe_schema_from_df(df):
-        """Build an HQL Schema from a Polars DataFrame, handling unsupported types.
-
-        pyhql's Schema.from_df fails on complex types like List(Struct).
-        This wrapper converts columns individually, falling back to a
-        multivalue(string) or string type for anything pyhql can't handle.
-        """
-        from Hql.Types.Polars import PolarsTypes as plt
-        from Hql.Types.Hql import HqlTypes as hqlt
-        schema_dict = {}
-        for col in df.columns:
-            dtype = df[col].dtype
-            try:
-                if isinstance(dtype, pl.Struct):
-                    # Let pyhql handle structs as nested schemas
-                    schema_dict[col] = _data_mod.Schema.from_df(
-                        pl.DataFrame(df[col]).unnest(col))
-                else:
-                    schema_dict[col] = plt.from_pure_polars(dtype)
-            except Exception:
-                # Fallback: List types → multivalue(string), else string
-                if isinstance(dtype, pl.List):
-                    schema_dict[col] = hqlt.multivalue(hqlt.string())
-                else:
-                    schema_dict[col] = hqlt.string()
-        return _data_mod.Schema(schema=schema_dict)
-
-    def _flatten_for_polars(rows):
-        """Convert nested dicts/lists to JSON strings so Polars can ingest."""
-        flat = []
-        for row in rows:
-            new_row = {}
-            for k, v in row.items():
-                if isinstance(v, (dict, list)):
-                    new_row[k] = json.dumps(v, default=str)
-                else:
-                    new_row[k] = v
-            flat.append(new_row)
-        return flat
-
-    def _init_table_fields(self, kwargs, df):
-        """Set required Table fields after manual DataFrame construction."""
-        self.df = df
-        self.schema = _safe_schema_from_df(df)
-        self.name = kwargs.get('name', '')
-        self.series = None
-        self.agg = None
-        self.agg_paths = []
-        self.agg_schema = _data_mod.Schema()
-
-    def _patched_table_init(self, *args, **kwargs):
-        try:
-            _orig_table_init(self, *args, **kwargs)
-        except (pl.exceptions.ComputeError, pl.exceptions.SchemaError,
-                OverflowError, TypeError, Exception) as first_err:
-            init_data = kwargs.get('init_data')
-            if init_data is None:
-                raise
-            # Fallback 1: let Polars infer schema natively
-            try:
-                df = pl.from_dicts(init_data, infer_schema_length=len(init_data))
-                _init_table_fields(self, kwargs, df)
-            except Exception:
-                # Fallback 2: flatten nested dicts/lists to JSON strings
-                flat = _flatten_for_polars(init_data)
-                df = pl.from_dicts(flat, infer_schema_length=len(flat))
-                _init_table_fields(self, kwargs, df)
-
-    _Table.__init__ = _patched_table_init
-
-    # ------------------------------------------------------------------
-    # Monkey-patch: fix MvExpand.explode_table variable name bug
-    # ------------------------------------------------------------------
-    # pyhql's MvExpand.explode_table has a copy-paste bug on line 11:
-    #   if not isinstance(path, pl.Expr):   <-- should be pl_expr, not path
-    # Since `path` is always a list (checked on line 7), this isinstance
-    # check ALWAYS fails, making mv-expand unusable.  Additionally, the
-    # multivalue type check (line 17) may fail when our fallback Table
-    # init bypasses pyhql's schema, so we also skip that guard for Polars
-    # List columns.
-    #
-    # @decision DEC-HQL-006
-    # @title Monkey-patch MvExpand to fix variable name bug and type check
-    # @status accepted
-    # @rationale mv-expand is essential for forensic queries on list fields
-    #   (e.g. UAL ExtendedProperties, ConditionalAccessPolicies).  The bug
-    #   is a clear typo (path vs pl_expr) confirmed by reading the source.
-    _mvexpand_mod = importlib.import_module('Hql.Operators.MvExpand')
-    _MvExpand = _mvexpand_mod.MvExpand
-    _hqlt = importlib.import_module('Hql.Types.Hql').HqlTypes
-
-    def _patched_explode_table(self, ctx, table, limit):
-        schema = table.schema
-        df = table.df
-
-        for to in self.exprs:
-            path = to.expr.eval(ctx, as_list=True)
-            if not isinstance(path, list):
-                from Hql.Exceptions import HqlExceptions as hqle
-                raise hqle.CompilerException(
-                    f'To expression return non-list type {type(path)}')
-
-            pl_expr = to.expr.eval(ctx, as_pl=True)
-            if not isinstance(pl_expr, pl.Expr):
-                from Hql.Exceptions import HqlExceptions as hqle
-                raise hqle.CompilerException(
-                    f'To expression return non-Expr type {type(pl_expr)}')
-
-            # Check schema type — allow both pyhql multivalue and Polars List
-            col_name = path[-1] if path else None
-            to_schema = schema.get_type(path).schema
-            is_list_col = isinstance(to_schema, _hqlt.multivalue)
-            if not is_list_col and col_name and col_name in df.columns:
-                # Fallback: check Polars dtype directly
-                is_list_col = isinstance(df[col_name].dtype, pl.List)
-
-            if not is_list_col:
-                continue
-
-            new_type = to_schema.inner if isinstance(
-                to_schema, _hqlt.multivalue) else to_schema
-            df = df.with_columns(
-                pl_expr.list.slice(0, limit)
-            ).explode(pl_expr)
-
-            if to.to:
-                new_type = to.to
-
-            schema.set(path, new_type)
-
-        return _Table(df=df, schema=schema, name=table.name)
-
-    _MvExpand.explode_table = _patched_explode_table
-
-    # ------------------------------------------------------------------
-    # dcount() aggregate (missing from pyhql 0.0.9)
-    # ------------------------------------------------------------------
-    # @decision DEC-HQL-007
-    # @title Register a dcount() aggregate function modelled on pyhql's count()
-    # @status accepted
-    # @rationale pyhql 0.0.9 rejects dcount() ("Unknown function dcount
-    #   referenced") although the catalog (hunt-signin-002) and KQL habits rely
-    #   on it.  count() is implemented by evaluating over each table's pending
-    #   GroupBy (table.agg); dcount does the same with n_unique() on the
-    #   argument column, so `summarize count(), dcount(x) by y` composes.
-    _ctx_mod = importlib.import_module('Hql.Context')
-    _func_mod = importlib.import_module('Hql.Functions')
-    _hqlt_types = importlib.import_module('Hql.Types.Hql').HqlTypes
+    _JSON.load_data = _patched_load_data
+    _JSON.eval = _patched_eval
 
     @_ctx_mod.register_func('dcount')
-    class _DCount(_func_mod.Function):
-        def __init__(self, args, name='dcount_', conf=None):
-            super().__init__(args, 1, 1)
-            self.dcount_name = name
+    class _DCount(_count_mod.count):
+        """dcount(x): distinct non-null count per summarize group, modelled on count() (patch 3)."""
 
-        def eval(self, ctx, **kwargs):
+        def __init__(self, args, name='dcount_', conf=None):
+            _Function.__init__(self, args, 1, 1)
+            self.count_name = name
+            self.count_type = _hqlt.uint()
+
+        def eval(self, ctx, receiver=None):
             tables = []
             for table in ctx.data:
                 if not table.agg:
                     tables.append(table)
                     continue
-                name = self.dcount_name
-                i = 0
-                while name in table.agg.agg():
-                    i += 1
-                    name = f'{self.dcount_name}{i}'
-                col = self.args[0].eval(ctx, as_pl=True)
-                df = table.agg.agg(col.n_unique().alias(name))
-                schema = table.agg_schema.copy().set([name], _hqlt_types.uint())
-                new = _Table(df=df, schema=schema, name=table.name)
-                new = new.drop_many(table.agg_paths)
-                tables.append(new)
-            return _data_mod.Data(tables=tables)
+                cname = self.get_count_name(table.agg)
+                col = self.args[0].polars().drop_nulls().n_unique().alias(cname.str())
+                df = table.agg.agg(col)
+                schema = table.agg_schema.copy().set(cname, self.count_type)
+                tables.append(_Table(df=df, schema=schema, name=table.name)
+                              .drop_many(table.agg_paths))
+            return _Data(tables=tables)
 
-    # ------------------------------------------------------------------
-    # Equality: tolerate number-vs-string literal mismatches
-    # ------------------------------------------------------------------
-    # @decision DEC-HQL-009
-    # @title Numeric/string tolerant == and != in HQL
-    # @status accepted
-    # @rationale Graph JSON carries status.errorCode as an integer while the
-    #   catalog (and analysts used to KQL's loose typing) write == "0".  With
-    #   stock pyhql the string-vs-int comparison silently matches nothing.
-    #   When the literal is a numeric string we compare as strings (so int and
-    #   string columns both work); when it is an integer literal we compare as
-    #   Float64 (so int, float and numeric-string columns all work).  Booleans
-    #   and non-numeric strings keep stock behaviour.
-    _logic_mod = importlib.import_module('Hql.Expressions.Logic')
-    _Equality = _logic_mod.Equality
     _num_re = re.compile(r'^-?\d+(\.\d+)?$')
+    _orig_equality_polars = _Equality.polars
 
-    def _patched_equality_as_pl(self, ctx):
-        from Hql.Exceptions import HqlExceptions as hqle
-        lh = self.lh.eval(ctx, as_pl=True)
-        if not isinstance(lh, pl.Expr):
-            raise hqle.CompilerException(
-                f'lh evaluated to non-pl.Expr type {type(lh)}')
+    def _patched_equality_polars(self):
+        """== / != tolerant of number-vs-string literals (patch 4)."""
+        reduced = self.reduce()
+        if not isinstance(reduced, _Equality) or len(reduced.rh) != 1:
+            return _orig_equality_polars(self)
+        try:
+            value = pl.select(reduced.rh[0].polars()).item()
+        except Exception:
+            return _orig_equality_polars(self)
+        lh = reduced.lh.polars()
+        if isinstance(value, str) and _num_re.match(value):
+            new = lh.cast(pl.String, strict=False) == value
+        elif isinstance(value, int) and not isinstance(value, bool):
+            new = lh.cast(pl.Float64, strict=False) == float(value)
+        else:
+            return _orig_equality_polars(self)
+        return ~new if reduced.neq else new
 
-        rh = []
-        for i in self.rh:
-            if i.requires_lh:
-                return i.eval(ctx, lh=lh, as_pl=True)
-            rh.append(i.eval(ctx, as_pl=True))
+    _Equality.polars = _patched_equality_polars
 
-        expr = None
-        for i in rh:
-            value = None
-            try:
-                value = pl.select(i).item()
-            except Exception:
-                pass
-            # Numeric literals are case-less, so this applies to == and to the
-            # case-insensitive form pyhql's own compiler rewrites != into
-            # (Compiler/Hql.py re-creates Equality from the rebuilt '!~' op).
-            if isinstance(value, str) and _num_re.match(value):
-                new = lh.cast(pl.String, strict=False) == value
-            elif isinstance(value, int) and not isinstance(value, bool):
-                new = lh.cast(pl.Float64, strict=False) == float(value)
-            elif self.cs:
-                new = (lh == i)
-            else:
-                i = pl.select(i.str.escape_regex()).item()
-                new = lh.str.contains(f'(?i)^{i}$')
+    # Patch 6 (DEC-HQL-018): string literals reach the evaluator with their VALUE, not a
+    # re-escaped copy, and verbatim literals honour the doubled-quote escape.
+    _StringLiteral, _MultiString = _lit_mod.StringLiteral, _lit_mod.MultiString
 
-            if self.neq:
-                new = ~new
-            expr = new if expr is None else (expr | new)
+    def _literal_value(self):
+        """The literal's actual text (Hql main returns a unicode_escape'd copy, so "a\\\\b" never matched)."""
+        return self.value.decode('utf-8')
 
-        if expr is None:
-            raise hqle.CompilerException('Equality returned None expression')
-        return expr
+    _StringLiteral.str = _literal_value
 
-    _Equality.as_pl = _patched_equality_as_pl
+    _orig_visit_string = _BaseExpressions.visitStringLiteralExpression
 
-except ImportError:
-    pass  # pyhql or ndjson not installed; errors will surface at query time
+    def _patched_visit_string(self, ctx):
+        result = _orig_visit_string(self, ctx)
+        parts = result.strlits if isinstance(result, _MultiString) else [result]
+        changed = False
+        for lit, tok in zip(parts, ctx.Tokens):
+            text = tok.text[1:] if tok.text[:1] in ('h', 'H') else tok.text
+            if text[:1] == '@' and len(text) > 1 and text[1] in ('"', "'"):
+                q = text[1]
+                fixed = lit.value.replace((q * 2).encode(), q.encode())
+                if fixed != lit.value:
+                    lit.value, changed = fixed, True
+        if changed and isinstance(result, _MultiString):
+            result.value = result.str().encode('utf-8')
+        return result
+
+    _BaseExpressions.visitStringLiteralExpression = _patched_visit_string
 
 
 # ---------------------------------------------------------------------------
@@ -623,15 +496,17 @@ def run_hql_query(
             'query': full_query,
         }
 
-    _query_state.dotted = _extract_dotted_paths(query_text)
-    try:
-        result = run_query(full_query, conf)
-    except Exception as exc:
-        # Convert HQL exceptions into user-friendly ValueError
-        msg = str(exc)
-        raise ValueError(f'HQL query error: {msg}') from exc
-    finally:
-        _query_state.dotted = None
+    global _active_dotted
+    with _query_lock:
+        _active_dotted = _extract_dotted_paths(query_text)
+        try:
+            result = run_query(full_query, conf)
+        except Exception as exc:
+            # Convert HQL exceptions into user-friendly ValueError
+            msg = str(exc)
+            raise ValueError(f'HQL query error: {msg}') from exc
+        finally:
+            _active_dotted = None
 
     # ------------------------------------------------------------------
     # Extract results from the first table in result.tables (a dict)

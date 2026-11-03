@@ -1,75 +1,43 @@
-aiohttp==3.11.11
-aiosignal==1.3.2
-async-timeout==5.0.1
-attrs==25.1.0
-azure-common==1.1.28
-azure-core==1.32.0
-azure-identity==1.19.0
+# Goosey runtime dependencies. Requires FREE-THREADED Python 3.14 (3.14t).
+#
+# Pins were resolved on CPython 3.14.10 free-threaded with `uv pip compile
+# --only-binary :all:` for linux (x86_64, aarch64), macOS arm64 and Windows
+# amd64; every compiled dependency ships a cp314t wheel there.  Only DIRECT
+# dependencies are pinned; transitive packages float within their parents' bounds.
+# (zstandard, supervisor, lxml, openpyxl, keyring, ... of the old freeze were never
+# imported by goosey and have been dropped.)
+
+# HQL engine: upstream Hashfastr/Hql `main`, pinned to an exact commit (not a branch).
+# It pulls polars==1.43.2 and the cp314t-only polars_runtime_32 wheels itself.
+# Installing this line needs `git` on PATH.
+pyhql @ git+https://github.com/Hashfastr/Hql@cb5fbede103c7e74ff0fcfff7f6ba942a32da48a
+
+aiohttp==3.14.5
+azure-core==1.41.0
+azure-identity==1.27.0
 azure-mgmt-authorization==4.0.0
-azure-mgmt-compute==34.0.0
-azure-mgmt-core==1.5.0
+azure-mgmt-compute==39.0.0
+# 6.0.2 on purpose: 7.0.0 removed MonitorManagementClient.diagnostic_settings,
+# which azure_dumper._dump_diagnostic_settings uses.
 azure-mgmt-monitor==6.0.2
-azure-mgmt-network==28.1.0
-azure-mgmt-resource==23.2.0
+azure-mgmt-network==33.1.0
+# azure-mgmt-resource >=24 dropped SubscriptionClient from the package root; it lives in
+# azure-mgmt-resource-subscriptions (azure.mgmt.resource.subscriptions).
+azure-mgmt-resource==26.0.0
+azure-mgmt-resource-subscriptions==1.0.0
 azure-mgmt-security==7.0.0
-azure-mgmt-storage==22.0.0
-azure-mgmt-web==8.0.0
-azure-storage-blob==12.24.1
-certifi==2024.12.14
-cffi==1.17.1
-charset-normalizer==3.4.1
-colored==2.2.4
-cryptography==44.0.1
+azure-mgmt-storage==25.3.0
+azure-mgmt-web==11.0.1
+azure-storage-blob==12.31.1
+colored==2.3.2
 darkdetect==0.8.0
-docstring-parser==0.16
-et-xmlfile==1.1.0
-fire==0.7.0
-flask==3.1.0
-frozenlist==1.4.1
-h11==0.16.0
-httplib2==0.22.0
-idna==3.10
-importlib-metadata==8.5.0
-isodate==0.6.1
-jeepney==0.8.0
-kaitaistruct==0.10
-keyring==25.4.1
-launchpadlib==2.0.0
-lazr.restfulclient==0.14.6
-lazr.uri==1.0.6
-lxml==5.3.0
-more-itertools==10.5.0
-msal==1.31.0
-msal-extensions==1.2.0
-msrest==0.7.1
-msrestazure==0.6.4.post1
-multidict==6.1.0
-oauthlib==3.2.2
-openpyxl==3.1.5
-outcome==1.3.0.post0
-pathvalidate==3.2.1
-portalocker==2.10.1
+docstring-parser==0.18.0
+fire==0.7.1
+flask==3.1.3
+msal==1.39.0
+pathvalidate==3.3.1
 pyAesCrypt==6.1.1
-pyasn1==0.6.1
-pycparser==2.22
-PyJWT==2.9.0
-pyparsing==3.1.4
-PySocks==1.7.1
 python-dateutil==2.9.0.post0
-pytz==2024.2
-requests==2.32.3
-requests-oauthlib==2.0.0
-SecretStorage==3.3.3
-six==1.16.0
-supervisor==4.2.5
-termcolor==2.4.0
-tqdm==4.66.5
-typing_extensions==4.12.2
-urllib3==2.2.3
-wadllib==1.3.9
-wsproto==1.2.0
-yarl==1.17.0
-zipp==3.20.2
-zstandard==0.23.0
-pyhql==0.0.9
-ndjson==0.3.1
+pytz==2026.6
+requests==2.34.2
+tqdm==4.70.1

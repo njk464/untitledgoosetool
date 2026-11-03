@@ -13,10 +13,11 @@ import os
 import re
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from aiohttp import web
 
 from goosey.entra_id_datadumper import EntraIdDataDumper
-from goosey.utils import parse_graph_ts, to_graph_ts
+from goosey.utils import PaginationIncomplete, parse_graph_ts, to_graph_ts
 from tests.helpers_aiohttp import FAKE_AUTH, serve
 
 NOW1 = datetime(2026, 11, 2, 13, 0, 0, tzinfo=timezone.utc)
@@ -193,7 +194,9 @@ def test_failed_chunk_does_not_advance_checkpoint(tmp_path):
         app.router.add_get("/beta/auditLogs/signIns", boom)
         async with serve(app) as (base, session):
             d = make_dumper(tmp_path, session, base, make_config("2026-11-02"), NOW1)
-            await d.dump_signins_rt()
+            # A failed window is no longer reported as success (DEC-PAGINATION-001).
+            with pytest.raises(PaginationIncomplete):
+                await d.dump_signins_rt()
     run(go())
     assert not os.path.exists(str(tmp_path / "out" / "entraid" / ".rt_signin_state"))
 

@@ -340,17 +340,62 @@ def check_output_dir(output_dir, logger):
         logger.error(f'{output_dir} exists but is not a directory or you do not have permissions to access. Exiting.')
         sys.exit(1)
 
-async def get_nextlink(url, outfile, session, logger, auth, dedupe=None):
-    """Follow @odata.nextLink pagination to retrieve all pages of a Graph API response.
+class PaginationIncomplete(Exception):
+    """Raised when a paged Graph/ARM collection could not be read to its end.
 
-    Microsoft Graph returns paginated results with an @odata.nextLink URL for the next page.
-    This function follows the chain until no more pages remain, appending all results to outfile.
-    Handles 429 rate limiting with sleep, 401 auth errors by returning, and general errors with retries.
+    @decision DEC-PAGINATION-001
+    @title Pagination never truncates silently
+    @status accepted
+    @rationale A 410 Gone on an expired @odata.nextLink used to be swallowed after the
+      retry budget, so callers saw a "successful" short file and advanced their checkpoint
+      past the missing rows (permanent silent data loss, found in a live pull).  get_nextlink
+      now raises this exception whenever the chain cannot be completed; time-windowed
+      collectors (sign-ins, audit) resume the window from the last timestamp written, all
+      other callers let it propagate so the task is reported FAILED and no savestate or
+      checkpoint is written.
+
+    Attributes: ``url`` (the link that failed), ``status`` (HTTP status or None),
+    ``outfile``, ``cause`` (last underlying exception).
+    """
+
+    def __init__(self, message, url=None, status=None, outfile=None, cause=None):
+        super().__init__(message)
+        self.url = url
+        self.status = status
+        self.outfile = outfile
+        self.cause = cause
+
+
+# Pause between retries of non-throttle failures (5xx, timeouts, dropped connections).
+NEXTLINK_RETRY_SLEEP = 2
+
+
+def _write_rows(outfile, rows):
+    """Append rows as JSON lines and fsync."""
+    with open(outfile, 'a+', encoding='utf-8') as f:
+        if rows:
+            f.write("\n".join([json.dumps(x) for x in rows]) + '\n')
+        f.flush()
+        os.fsync(f)
+
+
+async def get_nextlink(url, outfile, session, logger, auth, dedupe=None, on_rows=None):
+    """Follow @odata.nextLink pagination, appending every page to outfile.
+
+    429 responses sleep and retry.  Other transient failures (5xx, timeouts, dropped
+    connections) are retried a bounded number of times.  Everything else ends the
+    chain by RAISING PaginationIncomplete (never by returning normally):
+    410 Gone (the skiptoken is dead; re-requesting it cannot succeed), 401 (token no
+    longer valid), and exhausted retries.  Returning normally therefore means the
+    whole chain was read.
+
+    ``on_rows(rows)`` is called with each page's rows (before de-duplication) so a
+    caller can track how far it got and resume after a PaginationIncomplete.
     """
     retries = DEFAULT_RETRIES
     while url:
+        skiptoken = 'unknown'
         try:
-            skiptoken = 'unknown'
             if '$skiptoken' in url:
                 skiptoken = url.split('skiptoken=')[1]
             elif '$skip' in url:
@@ -361,58 +406,123 @@ async def get_nextlink(url, outfile, session, logger, auth, dedupe=None):
             header = {'Authorization': '%s %s' % (auth['token_type'], auth['access_token'])}
             async with session.get(url, headers=header, raise_for_status=True, timeout=600) as r2:
                 result2 = await r2.json()
-                if 'value' in result2:
-                    finalvalue = result2['value']
-                elif 'value' not in result2:
-                    finalvalue = result2
-                if not skiptoken == '50':
-                    logger.debug(f'Received nextLink {skiptoken} {url}')
+            if isinstance(result2, dict) and 'value' in result2:
+                finalvalue = result2['value']
+            else:
+                finalvalue = result2
+            if not skiptoken == '50':
+                logger.debug(f'Received nextLink {skiptoken} {url}')
 
-                if dedupe is not None and isinstance(finalvalue, list):
-                    finalvalue = dedupe.filter(finalvalue)
-                with open(outfile, 'a+', encoding='utf-8') as f:
-                    logger.debug(f"Writing to {outfile}")
-                    if finalvalue or dedupe is None:
-                        f.write("\n".join([json.dumps(x) for x in finalvalue]) + '\n')
-                    f.flush()
-                    os.fsync(f)
-                if '@odata.nextLink' in result2:
-                    url = result2['@odata.nextLink']
-                    retries = DEFAULT_RETRIES
-                else:
-                    url = None
-        except asyncio.TimeoutError:
-            logger.error('TimeoutError has occurred on {}'.format(skiptoken))
-            if retries == 0:
-                logger.info('Error. No more retries after timeout on {}.'.format(skiptoken))
-                url = None
+            if on_rows is not None and isinstance(finalvalue, list):
+                on_rows(finalvalue)
+            if dedupe is not None and isinstance(finalvalue, list):
+                finalvalue = dedupe.filter(finalvalue)
+            logger.debug(f"Writing to {outfile}")
+            if finalvalue or dedupe is None:
+                _write_rows(outfile, finalvalue)
+            if isinstance(result2, dict) and '@odata.nextLink' in result2:
+                url = result2['@odata.nextLink']
+                retries = DEFAULT_RETRIES
             else:
-                retries -= 1
-                logger.info('Retrying {} up to {} more times'.format(skiptoken, retries))
-                await asyncio.sleep(5)
+                url = None
         except Exception as e:
-            if retries == 0:
-                logger.info('Error. No more retries on {}.'.format(skiptoken))
-                url = None
+            status = getattr(e, 'status', None)
+            if status == 410:
+                logger.error(f'nextLink {skiptoken} returned 410 Gone (expired skiptoken); pagination of {outfile} is incomplete.')
+                raise PaginationIncomplete(f'410 Gone on nextLink for {outfile}', url=url, status=410,
+                                           outfile=outfile, cause=e) from e
+            if status == 401:
+                logger.error('Unauthorized message received during pagination. Check auth to make sure it is not expired.')
+                raise PaginationIncomplete(f'401 Unauthorized on nextLink for {outfile}', url=url, status=401,
+                                           outfile=outfile, cause=e) from e
+            if retries <= 0:
+                logger.error(f'No more retries on nextLink {skiptoken}: {e!r}')
+                raise PaginationIncomplete(f'retries exhausted on nextLink for {outfile}: {e!r}', url=url,
+                                           status=status, outfile=outfile, cause=e) from e
+            retries -= 1
+            if status == 429:
+                logger.info('Sleeping for %d seconds because of API throttle limit was exceeded.' % RATE_LIMIT_SLEEP_SECONDS)
+                await asyncio.sleep(RATE_LIMIT_SLEEP_SECONDS)
             else:
-                logger.info('Error. Retrying {} up to {} more times'.format(skiptoken, retries))
-                try:
-                    if e.status:
-                        if e.status == 429:
-                            logger.info('Sleeping for %d seconds because of API throttle limit was exceeded.' % RATE_LIMIT_SLEEP_SECONDS)
-                            await asyncio.sleep(RATE_LIMIT_SLEEP_SECONDS)
-                        elif e.status == 401:
-                            logger.error('Unauthorized message received. Exiting calls.')
-                            logger.error("Check auth to make sure it's not expired.")
-                            return
-                        else:
-                            logger.info('Error: {}'.format(str(e)))
-                        retries -= 1
-                except AttributeError as a:
-                    logger.error('Error on nextLink retrieval {}: {}'.format(skiptoken, str(e)))
-                    retries -= 1
-                    if retries == 0:
-                        url = None
+                logger.info(f'Error on nextLink {skiptoken}: {e!r}. Retrying up to {retries} more times')
+                await asyncio.sleep(NEXTLINK_RETRY_SLEEP)
+
+
+# HTTP statuses that retrying cannot fix: fail the window immediately.
+_FATAL_STATUSES = (400, 403, 404)
+SIGNIN_CHUNK_ATTEMPTS = 5
+
+
+async def collect_time_chunk(session, logger, auth, url, outfile, ts_field, chunk_start, chunk_end, dedupe,
+                             extra_params=None, refresh_token=None, max_attempts=SIGNIN_CHUNK_ATTEMPTS, label=''):
+    """Collect one ``[chunk_start, chunk_end)`` window of a timestamp-ordered Graph collection.
+
+    Issues the first request with ``$orderby ts_field`` and a ``ts_field ge/lt`` filter, then
+    follows nextLinks.  If paging breaks (410 Gone, 401, retries exhausted, a failed first
+    request) the window is RESUMED by re-querying with ``ge <latest timestamp already
+    written>`` and a de-duplicator re-loaded from ``outfile`` so overlapping rows are not
+    written twice.  Returns normally only when the whole window was paged.  After
+    ``max_attempts`` failed attempts raises PaginationIncomplete (the caller must not
+    advance its checkpoint).
+
+    ``chunk_start``/``chunk_end`` are Graph timestamp strings; ``refresh_token()`` (optional)
+    is called after a 401 so a refreshed token in ``auth`` is picked up.
+    """
+    max_ts = None  # latest row timestamp (aware UTC datetime) written for this window
+
+    def track(rows):
+        nonlocal max_ts
+        for row in rows:
+            ts = _parse_row_ts(row.get(ts_field)) if isinstance(row, dict) else None
+            if ts is not None and (max_ts is None or ts > max_ts):
+                max_ts = ts
+
+    last = None
+    throttled = 0
+    attempt = 0
+    while attempt < max_attempts:
+        lower = chunk_start if max_ts is None else to_graph_ts(max_ts)
+        if attempt > 0:
+            logger.warning(f'{label}: resuming window {chunk_start} to {chunk_end} from {lower} '
+                           f'(attempt {attempt + 1}/{max_attempts})')
+            dedupe.seen |= IdDedupe(outfile).seen
+        params = {'api-version': 'beta', '$orderby': ts_field,
+                  '$filter': '(%s ge %s and %s lt %s)' % (ts_field, lower, ts_field, chunk_end)}
+        params.update(extra_params or {})
+        try:
+            header = {'Authorization': '%s %s' % (auth['token_type'], auth['access_token'])}
+            async with session.get(url, headers=header, params=params, raise_for_status=True, timeout=600) as r:
+                result = await r.json()
+            if not isinstance(result, dict) or 'value' not in result:
+                raise PaginationIncomplete(f'unexpected response body for {label} window starting {lower}: '
+                                           f'{str(result)[:200]}', outfile=outfile)
+            track(result['value'])
+            fresh = dedupe.filter(result['value'])
+            if fresh:
+                _write_rows(outfile, fresh)
+            await get_nextlink(result.get('@odata.nextLink'), outfile, session, logger, auth,
+                               dedupe=dedupe, on_rows=track)
+            return
+        except Exception as e:
+            last = e
+            status = getattr(e, 'status', None)
+            if status == 429 and throttled < DEFAULT_RETRIES:
+                throttled += 1
+                logger.info('Sleeping for %d seconds because of API throttle limit was exceeded.' % RATE_LIMIT_SLEEP_SECONDS)
+                await asyncio.sleep(RATE_LIMIT_SLEEP_SECONDS)
+                continue  # throttling does not consume an attempt
+            if status == 401 and refresh_token is not None:
+                refresh_token()
+            if status in _FATAL_STATUSES:
+                logger.error(f'{label}: HTTP {status} for window {chunk_start} to {chunk_end}: {e}')
+                break
+            logger.error(f'{label}: window {chunk_start} to {chunk_end} interrupted ({e!r}).')
+            attempt += 1
+            await asyncio.sleep(NEXTLINK_RETRY_SLEEP)
+    raise PaginationIncomplete(
+        f'{label}: could not collect {chunk_start} to {chunk_end}'
+        + (f' (rows written through {to_graph_ts(max_ts)})' if max_ts else '') + f': {last!r}',
+        outfile=outfile, status=getattr(last, 'status', None), cause=last)
 
 async def run_kql_query(query, start, end, bounds, url, app_auth, logger, session, threshold=LAW_QUERY_THRESHOLD, summarize=False):
     """Execute a KQL query against an Azure Log Analytics workspace.
@@ -688,6 +798,8 @@ async def helper_single_object(endpoint, params, failurefile=None, retries=5, ca
                 if '@odata.nextLink' in result:
                     nexturl = result['@odata.nextLink']
                     await get_nextlink(nexturl, outfile, session, logger, auth)
+        except PaginationIncomplete:
+            raise  # truncated collection: surface as a FAILED task, never as Success (DEC-PAGINATION-001)
         except Exception as e:
             try:
                 if e.status:
