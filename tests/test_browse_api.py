@@ -18,7 +18,6 @@ Tests validate:
 
 import json
 import os
-import tempfile
 import pytest
 
 # We import the Flask app and the helper functions from web.py
@@ -490,3 +489,79 @@ class TestBrowsePreviewEndpoint:
         data = resp.get_json()
         # 2 lines, default 50 request — all lines returned
         assert data["has_more"] is False
+
+
+# ---------------------------------------------------------------------------
+# Field-filter context menu: HQL literal escaping (index.html hqlStr/hqlCol)
+# ---------------------------------------------------------------------------
+
+TRICKY_VALUES = [
+    r"NT SERVICE\SExchangeServiceHostNetCore",
+    r'C:\Windows\System32\cmd.exe /c "echo hi"',
+    'a"b',
+    "it's",
+    "tab\there",
+    "C:\\dir\\",
+    "line1\nline2",
+    r"""C:\a "b" 'c'""",
+]
+
+
+def _hql_str(v):
+    """Python mirror of index.html hqlStr(): keep the two rules identical (KQL escaping)."""
+    return ('"' + v.replace("\\", "\\\\").replace('"', '\\"')
+            .replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t") + '"')
+
+
+@pytest.fixture
+def tricky_dir(tmp_path):
+    rel = "entraid/entraidsigninlogs_tricky.json"
+    os.makedirs(tmp_path / "entraid")
+    with open(tmp_path / rel, "w", encoding="utf-8") as f:
+        for i, v in enumerate(TRICKY_VALUES + ["plain"]):
+            f.write(json.dumps({"id": i, "Account": v}) + "\n")
+    return str(tmp_path), rel
+
+
+@pytest.mark.parametrize("value", TRICKY_VALUES)
+@pytest.mark.parametrize("op", ["==", "contains"])
+def test_field_filter_query_with_escaped_value(client, tricky_dir, value, op):
+    """The query the UI generates for a right-clicked cell must parse and match."""
+    out, rel = tricky_dir
+    query = f"where Account {op} {_hql_str(value)}"
+    r = client.post("/api/browse/query", query_string={"output_dir": out},
+                    json={"query": query, "file": rel})
+    assert r.status_code == 200, r.get_json()
+    assert [row["Account"] for row in r.get_json()["rows"]] == [value]
+
+
+def test_field_filter_not_equal_excludes_value(client, tricky_dir):
+    out, rel = tricky_dir
+    value = TRICKY_VALUES[0]
+    r = client.post("/api/browse/query", query_string={"output_dir": out},
+                    json={"query": f"where Account != {_hql_str(value)}", "file": rel})
+    assert r.status_code == 200, r.get_json()
+    accounts = [row["Account"] for row in r.get_json()["rows"]]
+    assert value not in accounts and "plain" in accounts and len(accounts) == len(TRICKY_VALUES)
+
+
+def test_field_filter_bracket_column(client, tricky_dir, tmp_path):
+    """Non-identifier column names are emitted as ['col'] (hqlCol)."""
+    out, rel = tricky_dir
+    r = client.post("/api/browse/query", query_string={"output_dir": out},
+                    json={"query": "where ['Account'] == \"plain\"", "file": rel})
+    assert r.status_code == 200 and r.get_json()["total"] == 1
+
+
+def test_index_html_field_filter_uses_escaping_helpers():
+    """Static guard: applyFieldFilter must never interpolate raw values/columns."""
+    import re
+    html_path = os.path.join(os.path.dirname(__file__), "..", "goosey", "templates", "index.html")
+    with open(html_path, encoding="utf-8") as f:
+        html = f.read()
+    m = re.search(r"function applyFieldFilter\(.*?\n}\n", html, re.S)
+    assert m, "applyFieldFilter not found"
+    body = m.group(0)
+    assert "hqlStr(val)" in body and "hqlCol(col)" in body
+    assert '"${val}"' not in body and "${col}" not in body
+    assert "function hqlStr(" in html and "function hqlCol(" in html

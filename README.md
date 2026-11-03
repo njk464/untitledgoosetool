@@ -46,32 +46,26 @@ For more guidance on how to use Untitled Goose Tool, please see: [Untitled Goose
 ## Getting Started
 
 ### Prerequisites
-Python >= 3.9 is required to run Untitled Goose Tool with Python. Python 3.12 is highly recommended as it results in better logging.
+A free-threaded Python 3.14 build (`python3.14t`) and `git` are required (pip fetches the pinned Hql engine from GitHub, so network access to github.com is needed). A regular (GIL) Python 3.14, or any older Python, will not work: `pip install .` stops with an explanatory error.
+
+Verify the build with `python -c "import sys; print(sys._is_gil_enabled())"`; it must print `False`.
 
 On a Windows machine, you will need to make sure to have the Microsoft Visual C++ redistributable package (14.x) installed prior to running the tool.
 
 It's also recommended to run Untitled Goose Tool within a virtual environment.
 
-#### Mac OSX
+#### Create the virtual environment (all platforms)
 ```sh
-pip3 install virtualenv
-virtualenv -p python3 .venv
-source .venv/bin/activate
+# Option A: uv (any OS; recommended)
+uv python install 3.14t
+uv venv --seed -p 3.14t .venv     # --seed installs pip into the venv
+# Option B: python.org 3.14 installer: tick "Download free-threaded binaries" (Windows)
+#           or choose the free-threaded package (macOS); executable is python3.14t / python3.14t.exe
+python3.14t -m venv .venv          # Windows: py -3.14t -m venv .venv
+source .venv/bin/activate      # Windows: .venv\Scripts\activate
 ```
 
-#### Linux
-```sh
-# You may need to run sudo apt-get install python3-venv first
-python3 -m venv .venv
-source .venv/bin/activate
-```
-
-#### Windows
-```console
-# You can also use py -3 -m venv .venv
-python -m venv .venv
-.venv\Scripts\activate
-```
+On Linux, Option A (uv) is the simplest way to get `python3.14t`; distro Python packages usually aren't free-threaded.
 
 ### Requirements
 The following EntraID/M365 permissions are required to run Untitled Goose Tool, and provide it read-only access to the tenant.
@@ -171,8 +165,7 @@ PS > ./Create_SP.ps1 -AppName GooseApp -Delete
 ### Developing and testing
 
 ```sh
-pip install -r requirements-dev.txt   # pytest, ruff, build
-pip install -e .
+pip install -e . -r requirements-dev.txt   # pytest, ruff, build
 python -m pytest tests/ -q
 ruff check goosey tests
 python -m build                        # sdist + wheel (templates and data files are included)
@@ -186,7 +179,7 @@ To install, clone the repository and then do a pip install:
 ```sh
 git clone https://github.com/cisagov/untitledgoosetool.git
 cd untitledgoosetool
-python3 -m pip install . 
+python3.14t -m pip install .   # inside the 3.14t virtual environment
 ```
 
 #### Docker

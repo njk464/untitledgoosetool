@@ -36,7 +36,7 @@ import sys
 import time
 
 from azure.identity import InteractiveBrowserCredential, DeviceCodeCredential
-from azure.mgmt.resource import SubscriptionClient
+from azure.mgmt.resource.subscriptions import SubscriptionClient
 from azure.mgmt.authorization import AuthorizationManagementClient
 
 from goosey.utils import write_auth, EXO_ANCHOR_MAILBOX

@@ -28,8 +28,13 @@ If you would like to submit a pull request, please submit it [here](https://gith
 
 ## Development setup ##
 
+goosey requires a **free-threaded Python 3.14** build (`python3.14t`); a regular
+(GIL) 3.14 cannot install the HQL engine's polars wheels. With
+[uv](https://docs.astral.sh/uv/): `uv python install 3.14t && uv venv -p 3.14t .venv`.
+`git` must be on `PATH` (the HQL engine is installed from a pinned upstream commit).
+
 ```sh
-python3 -m venv .venv && source .venv/bin/activate
+python3.14t -m venv .venv && source .venv/bin/activate
 pip install -r requirements-dev.txt   # pytest, ruff, build
 pip install -e .
 python -m pytest tests/ -q
